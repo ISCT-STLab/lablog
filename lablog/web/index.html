@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self'; object-src 'none'; base-uri 'none'">
+  <title>LabLog</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="apple-mobile-web-app-title" content="LabLog">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#ecece8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="wallpaper" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <header class="topbar at-top">
+    <div class="topbar-inner">
+      <div class="topbar-bg" aria-hidden="true"></div>
+      <a class="brand" href="#/day"><img src="favicon.svg" alt="" width="22" height="22">LabLog</a>
+      <div id="status" class="status" aria-live="polite"></div>
+      <nav class="tabs" aria-label="表示の切り替え">
+        <a href="#/day" data-tab="day">日</a>
+        <a href="#/month" data-tab="month">月</a>
+      </nav>
+      <div class="tools">
+        <button id="pause" class="btn btn-ghost btn-icon" type="button"></button>
+        <a class="btn btn-ghost btn-icon" href="#/settings" data-tab="settings" aria-label="設定" title="設定"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></a>
+      </div>
+    </div>
+  </header>
+  <div id="notices" class="wrap"></div>
+  <main id="view" class="wrap"></main>
+  <footer id="foot" class="wrap foot"></footer>
+  <div id="tip" class="tip" role="tooltip" hidden></div>
+  <script src="config.js"></script>
+  <script src="cloud.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

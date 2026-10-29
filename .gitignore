@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# 開発用の設定（自分の PC のパスが入る）
+.claude/
+# リリース用に作った ZIP
+dist/

@@ -1,0 +1,341 @@
+"""定期的にまとめて取り込む材料：ブラウザ履歴・最近使ったファイル・Git。"""
+
+import json
+import logging
+import os
+import shutil
+import sqlite3
+import struct
+import time
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+
+from .config import data_dir
+from .db import in_ranges, kv_get, kv_set, paused_ranges
+from .days import day_range, logical_date
+from .filewatch import IGNORE_DIRS
+from .winapi import run_quiet
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------- ブラウザ履歴
+
+BROWSERS = {
+    "chrome": ("Chrome", Path("Google") / "Chrome" / "User Data"),
+    "edge": ("Edge", Path("Microsoft") / "Edge" / "User Data"),
+}
+CHROME_EPOCH_OFFSET = 11644473600  # 1601-01-01 から 1970-01-01 までの秒数
+SKIP_SCHEMES = {"chrome", "edge", "about", "chrome-extension", "extension", "devtools", "data", "blob",
+                "chrome-search", "edge-extension"}
+
+
+def _browser_profiles(base: Path):
+    if not base.is_dir():
+        return
+    for child in base.iterdir():
+        if (child / "History").is_file():
+            yield child.name, child / "History"
+
+
+def import_browser_history(conn, browsers_enabled: dict, now: float):
+    tmp_dir = data_dir() / "tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    for key, (label, rel) in BROWSERS.items():
+        if not browsers_enabled.get(key, True):
+            continue
+        for profile, src in _browser_profiles(local / rel):
+            try:
+                _import_profile(conn, key, label, profile, src, tmp_dir, now)
+            except Exception:
+                log.exception("%s (%s) の履歴を読み込めませんでした", label, profile)
+
+
+def _import_profile(conn, key, label, profile, src: Path, tmp_dir: Path, now: float):
+    state_key = f"hist:{key}:{profile}"
+    mtime = src.stat().st_mtime
+    if kv_get(conn, state_key + ":mtime") == str(mtime):
+        return
+    copy = tmp_dir / f"history_{key}_{profile.replace(' ', '_')}.sqlite"
+    shutil.copyfile(src, copy)  # ブラウザが開いていても読めるようにコピーしてから読む
+    last_id = int(kv_get(conn, state_key + ":last_id", -1))
+    since = day_range(logical_date(now))[0]  # 初回は今日（朝 5 時以降）の分だけ取り込む
+    src_conn = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
+    try:
+        max_id = src_conn.execute("SELECT MAX(id) FROM visits").fetchone()[0] or 0
+        if last_id > max_id:  # 履歴が削除されて番号が振り直された
+            last_id = -1
+            since = float(kv_get(conn, state_key + ":last_ts", since))
+        if last_id < 0:
+            chrome_since = int((since + CHROME_EPOCH_OFFSET) * 1_000_000)
+            rows = src_conn.execute(
+                "SELECT v.id, v.visit_time, v.transition, u.url, u.title FROM visits v "
+                "JOIN urls u ON u.id = v.url WHERE v.visit_time >= ? ORDER BY v.id", (chrome_since,)).fetchall()
+        else:
+            rows = src_conn.execute(
+                "SELECT v.id, v.visit_time, v.transition, u.url, u.title FROM visits v "
+                "JOIN urls u ON u.id = v.url WHERE v.id > ? ORDER BY v.id", (last_id,)).fetchall()
+    finally:
+        src_conn.close()
+        try:
+            copy.unlink()
+        except OSError:
+            pass
+
+    pauses = paused_ranges(conn, rows[0][1] / 1e6 - CHROME_EPOCH_OFFSET, now, now) if rows else []
+    batch = []
+    for visit_id, visit_time, transition, url, title in rows:
+        last_id = max(last_id, visit_id)
+        ts = visit_time / 1_000_000 - CHROME_EPOCH_OFFSET
+        core = transition & 0xFF
+        redirect = transition & 0xC0000000
+        if core in (3, 4) or (redirect and not transition & 0x20000000):
+            continue  # 埋め込みフレームや、途中で転送されたページ
+        parsed = urlparse(url)
+        if parsed.scheme in SKIP_SCHEMES or in_ranges(ts, pauses):
+            continue
+        domain = (parsed.hostname or ("file" if parsed.scheme == "file" else "")).removeprefix("www.")
+        batch.append((ts, label, profile, visit_id, url, title or "", domain))
+    if batch:
+        conn.executemany("INSERT OR IGNORE INTO web_visits (ts, browser, profile, visit_id, url, title, domain) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+        kv_set(conn, state_key + ":last_ts", batch[-1][0])
+    kv_set(conn, state_key + ":last_id", last_id)
+    kv_set(conn, state_key + ":mtime", mtime)
+
+
+# ---------------------------------------------------------------- Claude Code の会話
+
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+CLAUDE_ACTIVITY = {"user", "assistant"}
+
+
+def _iso_ts(text) -> float | None:
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def import_claude_code(conn, now: float, root: Path | None = None):
+    """Claude Code の会話記録から、会話の題名・作業フォルダ・やりとりした時刻（分単位）だけを取り込む。
+
+    会話の中身は保存しない。ファイルは前回読んだ位置から続きだけを読む。初回は今日（朝 5 時以降）の分だけ。
+    """
+    root = root or CLAUDE_PROJECTS
+    if not root.is_dir():
+        return
+    since = day_range(logical_date(now))[0]
+    pauses = paused_ranges(conn, 0, now, now)
+    for path in root.glob("*/*.jsonl"):
+        key = f"claude:{path}"
+        size = path.stat().st_size
+        offset = int(kv_get(conn, key, -1))
+        first = offset < 0
+        if offset > size:  # ファイルが作り直された
+            offset = 0
+        if offset == size:
+            continue
+        with open(path, "rb") as fh:
+            fh.seek(max(offset, 0))
+            chunk = fh.read(size - max(offset, 0))
+        end = chunk.rfind(b"\n") + 1  # 書きかけの最後の行は次回に回す
+        if not end:
+            continue
+        sessions: dict[str, dict] = {}
+        minutes: set[tuple[str, float]] = set()
+        for raw in chunk[:end].splitlines():
+            try:
+                line = json.loads(raw)
+            except ValueError:
+                continue
+            sid = line.get("sessionId") if isinstance(line, dict) else None
+            if not isinstance(sid, str):
+                continue
+            s = sessions.setdefault(sid, {"title": None, "folder": None, "first": None, "last": None})
+            kind = line.get("type")
+            if kind == "custom-title" and isinstance(line.get("customTitle"), str):
+                s["title"] = line["customTitle"].strip()[:100] or s["title"]
+            elif kind == "agent-name" and isinstance(line.get("agentName"), str) and not s["title"]:
+                s["title"] = line["agentName"].strip()[:100] or None
+            elif kind in CLAUDE_ACTIVITY:
+                ts = _iso_ts(line.get("timestamp"))
+                if ts is None or (first and ts < since) or in_ranges(ts, pauses):
+                    continue
+                minutes.add((sid, ts // 60 * 60))
+                if isinstance(line.get("cwd"), str):
+                    s["folder"] = os.path.basename(line["cwd"].rstrip("\\/")) or None
+                s["first"] = min(s["first"] or ts, ts)
+                s["last"] = max(s["last"] or ts, ts)
+        for sid, s in sessions.items():
+            if not (s["title"] or s["first"]):
+                continue
+            conn.execute(
+                "INSERT INTO ai_sessions (source, session_id, title, folder, first_ts, last_ts) "
+                "VALUES ('claude-code', ?, ?, ?, ?, ?) ON CONFLICT(source, session_id) DO UPDATE SET "
+                "title = COALESCE(excluded.title, title), folder = COALESCE(excluded.folder, folder), "
+                "first_ts = MIN(COALESCE(first_ts, excluded.first_ts), COALESCE(excluded.first_ts, first_ts)), "
+                "last_ts = MAX(COALESCE(last_ts, excluded.last_ts), COALESCE(excluded.last_ts, last_ts))",
+                (sid, s["title"], s["folder"], s["first"], s["last"]))
+        conn.executemany("INSERT OR IGNORE INTO ai_activity (source, session_id, minute) VALUES ('claude-code', ?, ?)",
+                         sorted(minutes))
+        kv_set(conn, key, max(offset, 0) + end)
+
+
+# ---------------------------------------------------------------- 最近使ったファイル
+
+def _lnk_target(path: Path) -> str | None:
+    """ショートカット（.lnk）からリンク先のパスを読む（MS-SHLLINK 形式）。"""
+    data = path.read_bytes()
+    if len(data) < 0x4C or data[:4] != b"\x4c\x00\x00\x00":
+        return None
+    flags = struct.unpack_from("<I", data, 0x14)[0]
+    pos = 0x4C
+    if flags & 0x01:  # HasLinkTargetIDList
+        pos += 2 + struct.unpack_from("<H", data, pos)[0]
+    if not flags & 0x02:  # HasLinkInfo
+        return None
+    info = pos
+    header_size = struct.unpack_from("<I", data, info + 4)[0]
+    local_off, _, suffix_off = struct.unpack_from("<III", data, info + 16)
+
+    def read_ansi(off):
+        end = data.index(b"\x00", off)
+        return data[off:end].decode("mbcs", errors="replace")
+
+    def read_unicode(off):
+        end = off
+        while data[end:end + 2] != b"\x00\x00":
+            end += 2
+        return data[off:end].decode("utf-16-le", errors="replace")
+
+    if header_size >= 0x24:
+        local_u, suffix_u = struct.unpack_from("<II", data, info + 28)
+        if local_u:
+            base = read_unicode(info + local_u)
+            suffix = read_unicode(info + suffix_u) if suffix_u else ""
+            return base + suffix
+    if not local_off:
+        return None
+    base = read_ansi(info + local_off)
+    suffix = read_ansi(info + suffix_off) if suffix_off else ""
+    return base + suffix
+
+
+def import_recent_files(conn, now: float):
+    recent = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Recent"
+    if not recent.is_dir():
+        return
+    last = float(kv_get(conn, "recent:last_mtime", day_range(logical_date(now))[0]))
+    pauses = paused_ranges(conn, last, now, now)
+    newest = last
+    batch = []
+    for lnk in recent.glob("*.lnk"):
+        try:
+            mtime = lnk.stat().st_mtime
+            if mtime <= last or in_ranges(mtime, pauses):
+                continue
+            target = _lnk_target(lnk)
+        except (OSError, ValueError, struct.error):
+            continue
+        newest = max(newest, mtime)
+        if not target or os.path.isdir(target):
+            continue
+        batch.append((mtime, target))
+    if batch:
+        conn.executemany("INSERT OR IGNORE INTO recent_files (ts, path) VALUES (?, ?)", batch)
+    kv_set(conn, "recent:last_mtime", newest)
+
+
+# ---------------------------------------------------------------- Git
+
+def _git(repo: str, *args: str, timeout: float = 30):
+    return run_quiet(["git", "-c", "core.quotepath=false", "-c", "i18n.logOutputEncoding=utf-8",
+                      "-C", repo, *args], timeout=timeout)
+
+
+def discover_repos(folders: list[str], max_depth: int = 4) -> list[str]:
+    repos: set[str] = set()
+    for folder in folders:
+        if not os.path.isdir(folder):
+            continue
+        try:
+            top = _git(folder, "rev-parse", "--show-toplevel", timeout=15)
+            if top.returncode == 0 and top.stdout.strip():
+                repos.add(os.path.normpath(top.stdout.strip()))
+        except Exception:
+            pass
+        root_depth = folder.rstrip("\\/").count(os.sep)
+        for dirpath, dirnames, _ in os.walk(folder):
+            if ".git" in dirnames or os.path.isfile(os.path.join(dirpath, ".git")):
+                repos.add(os.path.normpath(dirpath))
+            depth = dirpath.count(os.sep) - root_depth
+            dirnames[:] = [] if depth >= max_depth else [
+                d for d in dirnames if d.lower() not in IGNORE_DIRS and not d.startswith(".")]
+    return sorted(repos)
+
+
+def poll_repo(conn, repo: str, now: float):
+    state = conn.execute("SELECT * FROM repo_state WHERE repo = ?", (repo,)).fetchone()
+    since_ts = float(kv_get(conn, f"git:{repo}:since", day_range(logical_date(now))[0]))
+    email = _git(repo, "config", "user.email", timeout=10).stdout.strip()
+    args = ["log", "--all", f"--since={datetime.fromtimestamp(since_ts - 60).isoformat(timespec='seconds')}",
+            "--format=%H%x1f%ct%x1f%ae%x1f%s"]
+    if email:
+        args.append(f"--author={email}")
+    result = _git(repo, *args)
+    if result.returncode == 0:
+        rows = []
+        for line in result.stdout.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) == 4:
+                rows.append((repo, parts[0], float(parts[1]), parts[2], parts[3]))
+        if rows:
+            conn.executemany("INSERT OR IGNORE INTO commits (repo, hash, ts, author, subject) "
+                             "VALUES (?, ?, ?, ?, ?)", rows)
+        kv_set(conn, f"git:{repo}:since", now)
+
+    status = _git(repo, "status", "--porcelain=v1")
+    dirty = len([l for l in status.stdout.splitlines() if l.strip()]) if status.returncode == 0 else 0
+    last_commit = _git(repo, "log", "-1", "--format=%ct").stdout.strip()
+    last_commit_ts = float(last_commit) if last_commit else None
+    branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    dirty_since = None
+    if dirty:
+        prev = state["dirty_since"] if state and state["dirty_since"] else None
+        dirty_since = prev or now
+    conn.execute(
+        "INSERT INTO repo_state (repo, branch, dirty_files, dirty_since, last_commit_ts, checked_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(repo) DO UPDATE SET branch = excluded.branch, "
+        "dirty_files = excluded.dirty_files, dirty_since = excluded.dirty_since, "
+        "last_commit_ts = excluded.last_commit_ts, checked_ts = excluded.checked_ts",
+        (repo, branch, dirty, dirty_since, last_commit_ts, now))
+
+
+def commit_reminders(conn, repos: list[str], hours: float, now: float) -> list[dict]:
+    """作業しているのに長くコミットしていないリポジトリ（通知する分）を返し、通知時刻を記録する。"""
+    threshold = hours * 3600
+    due = []
+    for repo in repos:
+        st = conn.execute("SELECT * FROM repo_state WHERE repo = ?", (repo,)).fetchone()
+        if not st or not st["dirty_files"]:
+            continue
+        uncommitted_from = max(st["dirty_since"] or now, st["last_commit_ts"] or 0)
+        if now - uncommitted_from < threshold:
+            continue
+        if st["last_notified_ts"] and now - st["last_notified_ts"] < threshold:
+            continue
+        # 実際に作業している（最近ファイルを編集した）リポジトリだけ知らせる
+        prefix = repo.rstrip("\\") + "\\"
+        edited = conn.execute("SELECT 1 FROM file_events WHERE ts > ? AND path LIKE ? ESCAPE '|' LIMIT 1",
+                              (now - threshold, _like_prefix(prefix))).fetchone()
+        if not edited:
+            continue
+        conn.execute("UPDATE repo_state SET last_notified_ts = ? WHERE repo = ?", (now, repo))
+        due.append({"repo": repo, "dirty_files": st["dirty_files"], "since": uncommitted_from})
+    return due
+
+
+def _like_prefix(prefix: str) -> str:
+    return prefix.replace("|", "||").replace("%", "|%").replace("_", "|_") + "%"
