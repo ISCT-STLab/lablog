@@ -1,9 +1,11 @@
-"""iPhone・iPad 用ビューアーを GitHub Pages に公開する。
+"""スマホ用ビューアーを GitHub Pages に公開する。
 
 ダッシュボードの画面ファイル（lablog/web）だけを公開用のフォルダに写し、ビューアー用の config.js を作る。
 記録のデータや設定は写さない。--push を付けると、コミットして GitHub に送る（gh-pages ブランチ）。
+安定版は公開用フォルダの一番上（…/lablog/）、テスト版は --beta で beta/ の下（…/lablog/beta/）に置く。
 
   python tools/publish_viewer.py --client-id <Microsoft のアプリ ID> --push
+  python tools/publish_viewer.py --beta --push
 """
 
 import argparse
@@ -18,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from lablog import GITHUB_REPO, VIEWER_URL  # noqa: E402
+from lablog import GITHUB_REPO, VIEWER_URL, __version__  # noqa: E402
 
 WEB_DIR = ROOT / "lablog" / "web"
 DEFAULT_SITE = ROOT.parent / "lablog-viewer"
@@ -29,7 +31,7 @@ CLIENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 BRANCH = "gh-pages"
 README = f"""# LabLog ビューアー
 
-[LabLog]({VIEWER_URL}) の iPhone・iPad 用の画面です。
+[LabLog]({VIEWER_URL}) のスマホ用の画面です（テスト版は beta/ の下）。
 PC の LabLog が OneDrive のアプリ専用フォルダに書き出した要約を、本人の Microsoft アカウントでサインインして表示します。
 このリポジトリには画面のプログラムだけがあり、記録のデータは含みません。
 """
@@ -49,15 +51,21 @@ def current_client_id(site: Path) -> str:
         return ""
 
 
-def build(site: Path, client_id: str):
-    site.mkdir(parents=True, exist_ok=True)
+def build(site: Path, client_id: str, beta: bool = False):
+    target = site / "beta" if beta else site
+    target.mkdir(parents=True, exist_ok=True)
     for name in FILES:
-        (site / name).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(WEB_DIR / name, site / name)
+        (target / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(WEB_DIR / name, target / name)
+    if beta:  # ホーム画面に追加したとき、安定版と見分けられるように
+        manifest = json.loads((target / "manifest.webmanifest").read_text(encoding="utf-8"))
+        manifest |= {"name": "LabLog（テスト版）", "short_name": "LabLog β"}
+        (target / "manifest.webmanifest").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     # build：どの版を表示しているか、ビューアーの一番下に出す（公開した日時）
-    config = json.dumps({"clientId": client_id, "build": datetime.now().strftime("%m/%d %H:%M")})
-    (site / "config.js").write_text(
-        "// iPhone・iPad 用ビューアーの設定（tools/publish_viewer.py が作る）。clientId は公開して問題ない値。\n"
+    # version：PC の LabLog がこれより古ければ、ビューアーが更新を勧める
+    config = json.dumps({"clientId": client_id, "version": __version__, "build": datetime.now().strftime("%m/%d %H:%M")})
+    (target / "config.js").write_text(
+        "// スマホ用ビューアーの設定（tools/publish_viewer.py が作る）。clientId は公開して問題ない値。\n"
         f"window.LABLOG_CLOUD = {config};\n", encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
     (site / "README.md").write_text(README, encoding="utf-8")
@@ -83,18 +91,21 @@ def main():
     parser.add_argument("--site", default=str(DEFAULT_SITE), help="公開用のフォルダ（git リポジトリ）")
     parser.add_argument("--client-id", help="Microsoft に登録したアプリの「アプリケーション (クライアント) ID」")
     parser.add_argument("--remote", default=DEFAULT_REMOTE)
+    parser.add_argument("--beta", action="store_true", help="テスト版として beta/ の下に置く")
     parser.add_argument("--push", action="store_true", help="コミットして GitHub に送る")
-    parser.add_argument("--message", default="ビューアーを更新")
+    parser.add_argument("--message", help="コミットのメッセージ")
     args = parser.parse_args()
 
     site = Path(args.site)
     client_id = args.client_id if args.client_id is not None else current_client_id(site)
     if client_id and not CLIENT_ID.match(client_id):
         sys.exit("アプリ ID の形式が正しくありません（xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）")
-    build(site, client_id)
-    print(f"公開用のファイルを作りました: {site}（アプリ ID: {client_id or '未設定'}）")
+    build(site, client_id, args.beta)
+    where = site / "beta" if args.beta else site
+    print(f"公開用のファイルを作りました: {where}（{__version__}、アプリ ID: {client_id or '未設定'}）")
     if args.push:
-        push(site, args.remote, args.message)
+        message = args.message or f"ビューアーを更新（{'テスト版' if args.beta else '安定版'} {__version__}）"
+        push(site, args.remote, message)
 
 
 if __name__ == "__main__":

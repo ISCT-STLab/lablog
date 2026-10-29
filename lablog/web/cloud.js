@@ -1,4 +1,4 @@
-// iPhone・iPad 用ビューアー：PC の LabLog が OneDrive に書き出した要約を読み、
+// スマホ用ビューアー：PC の LabLog が OneDrive に書き出した要約を読み、
 // 日報と滞在の修正を OneDrive に書き戻す（PC の LabLog が次に動いたときに取り込む）。
 // PC のダッシュボードと同じ画面（app.js）を使うため、/api/... の呼び出しをここで OneDrive の読み書きに置き換える。
 // Microsoft へのサインインは PKCE 方式。パスワードはこのページでは扱わず、外部のライブラリも使わない。
@@ -308,7 +308,9 @@ window.LabLogCloud = (() => {
     await checkPending(meta);
     const base = { today: today(), offline: state.offline, pending: pendingEdits().length };
     if (!meta) return { ...base, state: "none" };
-    return { ...meta.status, ...base, exported: meta.exported };
+    // app_version：PC の LabLog の版（前の版の PC は書かない）。viewer_version：このビューアーを公開したときの版
+    return { ...meta.status, ...base, exported: meta.exported, app_version: meta.app_version || null,
+             viewer_version: cfg.version || null, device: meta.device ? meta.device.name : null };
   }
 
   async function getDay(date) {

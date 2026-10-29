@@ -1,9 +1,9 @@
-"""要約した記録を OneDrive に書き出し、iPhone・iPad から直した内容を取り込む。
+"""要約した記録を OneDrive に書き出し、スマホから直した内容を取り込む。
 
 書き出すのは要約（入退室・PC作業時間・分類別の時間・タイムラインの分類・日報）だけ。
 ウィンドウ名・閲覧履歴・ファイルのパスなどの元の記録は、この PC の外に出さない。
 
-書き出し先は iPhone・iPad 用ビューアーの OneDrive アプリフォルダ（OneDrive\\アプリ\\LabLog）。
+書き出し先は スマホ用ビューアーの OneDrive アプリフォルダ（OneDrive\\アプリ\\LabLog）。
 ビューアーで初めてサインインしたときに OneDrive が作り、ビューアーが目印の viewer.json を置く。
 
   meta.json            状態・最終更新時刻
@@ -18,10 +18,11 @@ import logging
 import os
 import threading
 import time
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import VIEWER_URL, db
+from . import VIEWER_URL, __version__, db
 from .categorize import Categorizer
 from .config import DAY_START_HOUR
 from .days import day_range, logical_date, parse_date
@@ -39,6 +40,8 @@ PERIODIC_SEC = 300      # 今日の分を書き出し直す間隔
 DETECT_SEC = 300        # 書き出し先が見つからないときに探し直す間隔
 REJECT_AFTER_SEC = 600  # 読めない修正ファイルを、同期の途中ではないとみなすまでの時間
 MAX_REPORT_CHARS = 50_000
+# 書き出す PC は 1 台だけ（meta.json の device）。その PC がこれだけ書き出していなければ、ほかの PC が引き継ぐ
+TAKEOVER_AFTER_SEC = 14 * 86400
 MIN_TS, MAX_TS = 946_684_800, 4_102_444_800  # 2000〜2100 年
 
 # クラウドに置く 1 日分の項目（apps・files・web など元の記録に近いものは含めない）
@@ -147,6 +150,9 @@ class CloudSync:
         self._written: dict[str, str] = {}  # 書き出したファイルの中身のハッシュ
         self._last_periodic = 0.0
         self._last_detect = 0.0
+        self.device: dict | None = None      # この PC の印（id は初回に作る。name は PC の名前）
+        self.blocked_by: dict | None = None  # ほかの PC が書き出しているとき、その PC の名前と最終更新
+        self._takeover = False
 
     def mark_dirty(self, *days: date):
         with self._lock:
@@ -158,6 +164,39 @@ class CloudSync:
             self._force = True
         self._wake.set()
 
+    def request_takeover(self):
+        """書き出す PC をこの PC にする（設定の画面の「この PC から書き出す」）。"""
+        with self._lock:
+            self._takeover = True
+            self._force = True
+        self._wake.set()
+
+    def _device(self, conn) -> dict:
+        if self.device is None:
+            device_id = db.kv_get(conn, "device_id")
+            if not device_id:
+                device_id = uuid.uuid4().hex
+                db.kv_set(conn, "device_id", device_id)
+            self.device = {"id": device_id, "name": os.environ.get("COMPUTERNAME") or "PC"}
+        return self.device
+
+    def _other_writer(self, conn, folder: Path, now: float, takeover: bool) -> dict | None:
+        """ほかの PC がこの OneDrive に書き出していれば、その PC（名前と最終更新）。この PC が書いてよければ None。"""
+        try:
+            meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        other = meta.get("device") or {}
+        if not other.get("id") or other["id"] == self._device(conn)["id"]:  # 印が無いのは前の版が書いたもの
+            return None
+        exported = meta.get("exported") or 0
+        if takeover or now - exported >= TAKEOVER_AFTER_SEC:
+            log.info("書き出す PC を、この PC にしました（前の PC：%s）", other.get("name"))
+            self._written.clear()  # 前の PC が書いた日の分も、この PC の記録で書き直す
+            self._full = True
+            return None
+        return {"name": other.get("name") or "別の PC", "exported": exported}
+
     def _cfg(self) -> dict:
         return {"enabled": True, "folder": "", "viewer_url": ""} | (self.settings.get("cloud") or {})
 
@@ -166,7 +205,7 @@ class CloudSync:
         # viewer_url が空なら配布元のブラウザ版（自分用にテスト版を使うときだけ設定で変える）
         return {"enabled": cfg["enabled"], "viewer_url": cfg["viewer_url"] or VIEWER_URL,
                 "folder": str(self.folder) if self.folder else None,
-                "last_export": self.last_export, "last_error": self.last_error}
+                "last_export": self.last_export, "last_error": self.last_error, "blocked_by": self.blocked_by}
 
     def loop(self):
         conn = db.connect()
@@ -184,6 +223,10 @@ class CloudSync:
         manual = self._cfg()["folder"]
         if manual:
             folder = Path(manual) if os.path.isdir(manual) else None
+        elif os.environ.get("LABLOG_DATA_DIR"):
+            # テスト用のデータ（--data-dir）で動かしているときは、本物の OneDrive のフォルダを自動では探さない
+            # （本物の書き出しをテストの記録で上書きしたり、スマホで直した内容を横取りしたりしないように）
+            folder = None
         elif self.folder is not None and (self.folder / MARKER).is_file():
             folder = self.folder
         elif force or now - self._last_detect >= DETECT_SEC:
@@ -202,11 +245,17 @@ class CloudSync:
     def run_once(self, conn, now: float):
         with self._lock:
             force, self._force = self._force, False
+            takeover, self._takeover = self._takeover, False
         if not self._cfg()["enabled"] or not self.settings.get("setup_done", True):
             self.folder = None
             return
         folder = self._resolve_folder(now, force)
         if folder is None:
+            return
+        self.blocked_by = self._other_writer(conn, folder, now, takeover)
+        if self.blocked_by:  # 書き出しも、スマホで直した内容の取り込みもしない（書き出している PC が取り込む）
+            self._written.clear()
+            self._full = True
             return
         changed = self.import_edits(conn, folder, now)
         with self._lock:
@@ -244,8 +293,10 @@ class CloudSync:
         for y, m in sorted({(d.year, d.month) for d in days if d <= today}):
             self._write(folder / "months" / f"{y:04d}-{m:02d}.json", month_summary(conn, self.settings, y, m, now))
         status = self.status_fn()
+        # app_version：ビューアーが、PC の LabLog が古いことを知らせるため。device：書き出している PC の印
         self._write(folder / "meta.json", {
-            "version": FORMAT_VERSION, "exported": now, "today": today.isoformat(),
+            "version": FORMAT_VERSION, "app_version": __version__, "device": self._device(conn),
+            "exported": now, "today": today.isoformat(),
             "day_start_hour": DAY_START_HOUR,
             "status": {k: status.get(k) for k in ("state", "since", "location", "paused")},
             "category_names": Categorizer(self.settings.get("categories")).names,
@@ -288,7 +339,7 @@ class CloudSync:
                 # 同期の途中かもしれないので、しばらくは消さずに待つ
                 try:
                     if now - path.stat().st_mtime > REJECT_AFTER_SEC:
-                        log.warning("iPhone・iPad からの修正ファイルを読めませんでした: %s", path.name)
+                        log.warning("スマホからの修正ファイルを読めませんでした: %s", path.name)
                         path.replace(path.with_suffix(".rejected"))
                 except OSError:
                     pass
@@ -296,9 +347,9 @@ class CloudSync:
         for _, name, path, edit in sorted(items, key=lambda x: (x[0], x[1])):
             try:
                 changed |= apply_edit(conn, edit)
-                log.info("iPhone・iPad からの修正を取り込みました: %s %s", edit.get("type"), edit.get("date", ""))
+                log.info("スマホからの修正を取り込みました: %s %s", edit.get("type"), edit.get("date", ""))
                 path.unlink(missing_ok=True)
             except (KeyError, TypeError, ValueError) as exc:
-                log.warning("iPhone・iPad からの修正を取り込めませんでした（%s）: %s", name, exc)
+                log.warning("スマホからの修正を取り込めませんでした（%s）: %s", name, exc)
                 path.replace(path.with_suffix(".rejected"))
         return changed

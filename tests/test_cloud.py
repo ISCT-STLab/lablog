@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from datetime import date, datetime
+from unittest import mock
 from pathlib import Path
 
 from lablog.cloud import CloudSync, apply_edit, cloud_day, find_viewer_folder
@@ -139,6 +140,68 @@ class CloudTest(unittest.TestCase):
         self.settings.update({"cloud": {"enabled": False, "folder": str(self.out), "viewer_url": ""}})
         self.sync.run_once(self.conn, self.now)
         self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_test_data_does_not_find_real_onedrive(self):
+        self.settings.update({"cloud": {"enabled": True, "folder": "", "viewer_url": ""}})
+        with mock.patch.dict(os.environ, {"LABLOG_DATA_DIR": self.tmp.name}), \
+                mock.patch("lablog.cloud.find_viewer_folder", return_value=self.out):
+            self.sync.run_once(self.conn, self.now)
+        self.assertIsNone(self.sync.folder)
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    # ---- 書き出す PC は 1 台だけ
+
+    def meta(self):
+        return json.loads((self.out / "meta.json").read_text(encoding="utf-8"))
+
+    def other_pc_wrote(self, ago_sec: float):
+        (self.out / "meta.json").write_text(json.dumps({"version": 1, "exported": self.now - ago_sec,
+                                                        "device": {"id": "other-pc", "name": "LAB-DESKTOP"}}),
+                                            encoding="utf-8")
+
+    def test_meta_has_app_version_and_device(self):
+        from lablog import __version__
+        self.sync.run_once(self.conn, self.now)
+        meta = self.meta()
+        self.assertEqual(meta["app_version"], __version__)
+        self.assertEqual(len(meta["device"]["id"]), 32)
+        self.sync.run_once(self.conn, self.now + 1)
+        self.assertEqual(self.meta()["device"]["id"], meta["device"]["id"])  # 同じ PC は同じ印のまま
+
+    def test_second_pc_does_not_write_or_import(self):
+        self.other_pc_wrote(ago_sec=600)
+        edits = self.out / "edits"
+        edits.mkdir()
+        (edits / "1-a.json").write_text(json.dumps({"type": "report", "date": D.isoformat(), "text": "スマホで書いた",
+                                                    "ts": self.now}), encoding="utf-8")
+        self.sync.run_once(self.conn, self.now)
+        self.assertEqual(self.sync.blocked_by["name"], "LAB-DESKTOP")
+        self.assertEqual(self.sync.status()["blocked_by"]["name"], "LAB-DESKTOP")
+        self.assertEqual(self.meta()["device"]["id"], "other-pc")      # 書き換えない
+        self.assertFalse((self.out / "days").exists())                   # 日の分も書かない
+        self.assertTrue((edits / "1-a.json").exists())                   # 修正は書き出している PC が取り込む
+
+    def test_takeover(self):
+        self.other_pc_wrote(ago_sec=600)
+        self.sync.run_once(self.conn, self.now)
+        self.assertIsNotNone(self.sync.blocked_by)
+        self.sync.request_takeover()
+        self.sync.run_once(self.conn, self.now + 1)
+        self.assertIsNone(self.sync.blocked_by)
+        self.assertNotEqual(self.meta()["device"]["id"], "other-pc")
+        self.assertTrue((self.out / "days" / f"{D.isoformat()}.json").exists())
+
+    def test_long_silent_pc_is_taken_over(self):
+        self.other_pc_wrote(ago_sec=15 * 86400)  # 2 週間以上書き出していない（買い替えなど）
+        self.sync.run_once(self.conn, self.now)
+        self.assertIsNone(self.sync.blocked_by)
+        self.assertNotEqual(self.meta()["device"]["id"], "other-pc")
+
+    def test_meta_without_device_is_taken_over(self):
+        (self.out / "meta.json").write_text(json.dumps({"version": 1, "exported": self.now - 60}), encoding="utf-8")
+        self.sync.run_once(self.conn, self.now)  # 前の版の LabLog が書いたもの
+        self.assertIsNone(self.sync.blocked_by)
+        self.assertIn("device", self.meta())
 
 
 if __name__ == "__main__":

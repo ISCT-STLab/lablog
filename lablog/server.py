@@ -243,6 +243,10 @@ class Api:
         db.thread_conn().execute("DELETE FROM screen_texts")
         return {"ok": True}
 
+    def post_cloud_takeover(self, body):
+        self.app.cloud.request_takeover()
+        return {"ok": True}
+
     def post_cloud_export(self, body):
         self.app.cloud.request_export()
         return {"ok": True}
@@ -277,7 +281,7 @@ POST_ROUTES = {"/api/settings": "post_settings", "/api/categories/reset": "post_
                "/api/pause": "post_pause", "/api/presence": "post_presence", "/api/ollama/setup": "post_ollama_setup",
                "/api/update/check": "post_update_check", "/api/update/install": "post_update_install", "/api/stay/save": "post_stay_save",
                "/api/stay/delete": "post_stay_delete", "/api/report/generate": "post_report_generate",
-               "/api/report/save": "post_report_save", "/api/cloud/export": "post_cloud_export",
+               "/api/report/save": "post_report_save", "/api/cloud/export": "post_cloud_export", "/api/cloud/takeover": "post_cloud_takeover",
                "/api/screen_texts/clear": "post_screen_texts_clear"}
 
 

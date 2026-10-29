@@ -1,5 +1,5 @@
 // LabLog ダッシュボード。PC ではサーバー（127.0.0.1）とだけ通信する。
-// iPhone・iPad 用ビューアーでは同じ画面を使い、データは cloud.js が OneDrive から読む（要約だけ）。
+// スマホ用ビューアーでは同じ画面を使い、データは cloud.js が OneDrive から読む（要約だけ）。
 "use strict";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -254,7 +254,8 @@ function renderCloudStatus(s) {
   if (s.paused) parts.push(`<span class="pill paused"><span class="dot"></span>記録を一時停止中</span>`);
   if (s.state !== "none") {
     const stale = s.exported && Date.now() / 1000 - s.exported > 15 * 60;
-    parts.push(`<span class="net ${stale ? "stale" : ""}">PC の最終更新：${s.exported ? fmtWhen(s.exported) : "—"}</span>`);
+    const pc = s.device ? `PC（${esc(s.device)}）の` : "PC の";
+    parts.push(`<span class="net ${stale ? "stale" : ""}">${pc}最終更新：${s.exported ? fmtWhen(s.exported) : "—"}</span>`);
   }
   $("#status").innerHTML = parts.join("");
   renderNotices();
@@ -268,6 +269,9 @@ function renderNotices() {
     if (s.state === "none") items.push(["warn", "まだ PC から記録が届いていません。PC の LabLog が動いていれば、数分で表示されます。"]);
     if (s.offline) items.push(["warn", "インターネットにつながらないため、前に読み込んだ内容を表示しています。"]);
     if (s.pending) items.push(["warn", `直した内容（${s.pending} 件）は、PC の LabLog が次に動いたときに反映されます。`]);
+    if (s.state !== "none" && s.viewer_version && versionLess(s.app_version, s.viewer_version)) {
+      items.push(["warn", `PC の LabLog が古い版${s.app_version ? `（${esc(s.app_version)}）` : ""}です。PC で LabLog を開き、設定の画面の「LabLog の更新」から更新してください。古いままだと、表示が正しくないことがあります。`]);
+    }
   }
   if (!cloud && s && s.update_failed) {
     items.push(["error", `新しい版（${esc(s.update_failed)}）を起動できなかったため、前の版（${esc(s.version)}）に戻しました。困ったときは、LabLog を配った人に知らせてください。`]);
@@ -282,6 +286,19 @@ function renderNotices() {
   }
   $("#notices").innerHTML = items.map(([kind, html]) =>
     `<div class="notice ${kind}"><span class="ico">!</span><div>${html}</div></div>`).join("");
+}
+
+// 版の番号を比べる（update.py の parse_version と同じ形：1.2.3、テスト版は 1.2.3b1 など）。a が分からなければ古いとみなす
+function parseVersion(text) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$/.exec(String(text || "").trim());
+  return m ? [+m[1], +m[2], +m[3], { a: 0, b: 1, rc: 2 }[m[4]] ?? 3, +(m[5] || 0)] : null;
+}
+function versionLess(a, b) {
+  const x = parseVersion(a), y = parseVersion(b);
+  if (!y) return false;
+  if (!x) return true;
+  for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
 }
 
 async function refreshStatus() {
@@ -649,7 +666,7 @@ const TITLE_ICONS = {
   "Wi-Fi の登録": '<path d="M2 8.8a15 15 0 0 1 20 0M5 12.4a10 10 0 0 1 14 0M8.5 15.9a5 5 0 0 1 7 0"/><path d="M12 19.5v.01"/>',
   "判定のしかた": '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
   "記録しないアプリ": '<path d="M3 3l18 18"/><path d="M10.6 5.1A9.8 9.8 0 0 1 12 5c5 0 8.7 4.2 9.7 7a12 12 0 0 1-2.3 3.4M6.6 6.6C4.4 8 2.9 10.2 2.3 12c1 2.8 4.7 7 9.7 7a9.5 9.5 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
-  "iPhone・iPad で見る": '<rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+  "スマホで見る": '<rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
   "ローカルAI（日報の要約）": '<path d="M12 3l1.8 4.7 4.7 1.8-4.7 1.8L12 16l-1.8-4.7-4.7-1.8 4.7-1.8z"/><path d="M19 15l.7 1.8 1.8.7-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7z"/>',
   "コミットの通知": '<path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 21h4"/>',
   "データの保存場所": '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/><path d="M4.5 5.5v13c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-13M4.5 12c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5"/>',
@@ -1014,7 +1031,7 @@ function fitTextarea(ta) {
   ta.style.height = "auto";
   ta.style.height = `${Math.max(180, ta.scrollHeight + 4)}px`;
 }
-// 画面の幅が変わったとき（iPhone・iPad の向きを変えたときなど）に日報の欄の高さを合わせ直す
+// 画面の幅が変わったとき（スマホの向きを変えたときなど）に日報の欄の高さを合わせ直す
 window.addEventListener("resize", () => { const ta = $("#report-text"); if (ta) fitTextarea(ta); });
 
 function renderReport(day, { editing = false } = {}) {
@@ -1251,7 +1268,7 @@ async function renderSettings() {
           <button class="btn" data-wifi-register="ignore" ${current ? "" : "disabled"}>判定に使わない</button>
         </div>
         <p class="help">研究室専用の Wi-Fi と、大学共通の Wi-Fi（ScienceTokyo など）は、どちらも「研究室」として登録してください。
-          iPhone のテザリングなど、研究室でも外でも使う Wi-Fi は「判定に使わない」にします。つないでいる間は、直前の状態（在室中・仮退出中）をそのまま続けます。</p>
+          スマホのテザリングなど、研究室でも外でも使う Wi-Fi は「判定に使わない」にします。つないでいる間は、直前の状態（在室中・仮退出中）をそのまま続けます。</p>
         <h3 class="help" style="margin-top:12px">研究室</h3><div class="set-list">${ssidList("univ")}</div>
         <h3 class="help">自宅</h3><div class="set-list">${ssidList("home")}</div>
         <h3 class="help">判定に使わない</h3><div class="set-list">${ssidList("ignore")}</div>
@@ -1299,7 +1316,7 @@ async function renderSettings() {
       </section>
 
       <section class="card">
-        <div class="card-head"><h2>iPhone・iPad で見る</h2></div>
+        <div class="card-head"><h2>スマホで見る</h2></div>
         <p class="help" id="cloud-state"><span class="tag">確認中…</span></p>
         <p class="help">OneDrive に置くのは要約だけです（入退室・PC作業時間・分類別の時間・日報）。ウィンドウ名・閲覧したページ・ファイルの場所は、この PC から出しません。</p>
         <form id="cloud-form" class="row">
@@ -1374,7 +1391,7 @@ async function renderSettings() {
 
       <section class="card span-2">
         <div class="card-head"><h2>データの保存場所</h2></div>
-        <p class="help"><code>${esc(dataDir)}</code><br>記録そのものは OneDrive の外に保存しているので、クラウドには同期されません（iPhone・iPad 用に書き出すのは要約だけです）。ダッシュボードはこの PC からだけ開けます。</p>
+        <p class="help"><code>${esc(dataDir)}</code><br>記録そのものは OneDrive の外に保存しているので、クラウドには同期されません（スマホ用に書き出すのは要約だけです）。ダッシュボードはこの PC からだけ開けます。</p>
       </section>
     </div>`;
 
@@ -1600,10 +1617,21 @@ async function loadCloudState() {
     ? `ビューアー：<a href="${safeHref(c.viewer_url)}" target="_blank" rel="noopener noreferrer">${esc(c.viewer_url)}</a>` : "";
   if (!c.enabled) {
     el.innerHTML = `<span class="tag">オフ</span> 書き出しを止めています。`;
+  } else if (c.blocked_by) {
+    // スマホに出せるのは 1 台の PC の記録だけ（cloud.py の _other_writer）
+    const other = esc(c.blocked_by.name);
+    el.innerHTML = `<span class="tag warn">別の PC が書き出しています</span> 「${other}」が、この OneDrive に書き出しています（最終更新 ${fmtWhen(c.blocked_by.exported)}）。スマホに出せるのは 1 台の PC の記録だけなので、この PC からは書き出していません。
+      <div class="row" style="margin-top:8px"><button class="btn btn-sm" type="button" id="cloud-takeover">この PC から書き出す</button></div>`;
+    $("#cloud-takeover").addEventListener("click", async () => {
+      if (!confirm(`書き出す PC を、この PC に切り替えます。「${c.blocked_by.name}」からの書き出しは止まり、スマホにはこの PC の記録が出ます。よろしいですか？`)) return;
+      await api.post("/api/cloud/takeover").catch((err) => alert(err.message));
+      flash("この PC から書き出します");
+      setTimeout(loadCloudState, 3000);
+    });
   } else if (c.last_error) {
     el.innerHTML = `<span class="tag warn">書き出せませんでした</span> ${esc(c.last_error)}`;
   } else if (!c.folder) {
-    el.innerHTML = `<span class="tag warn">書き出し先がまだありません</span> iPhone・iPad でビューアーを開いて Microsoft アカウントでサインインすると、OneDrive に専用のフォルダができて、数分で書き出しを始めます。<br>${viewer}`;
+    el.innerHTML = `<span class="tag warn">書き出し先がまだありません</span> スマホでビューアーを開いて Microsoft アカウントでサインインすると、OneDrive に専用のフォルダができて、数分で書き出しを始めます。<br>${viewer}`;
   } else {
     el.innerHTML = `<span class="tag">書き出し中</span> ${c.last_export ? `最終更新 ${fmtWhen(c.last_export)}・` : ""}書き出し先 <code>${esc(c.folder)}</code><br>${viewer}`;
   }

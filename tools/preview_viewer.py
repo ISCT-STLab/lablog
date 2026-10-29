@@ -1,9 +1,10 @@
-"""iPhone・iPad 用ビューアーを PC で試す（OneDrive やサインインを使わずに、表示と操作を確かめる）。
+"""スマホ用ビューアーを PC で試す（OneDrive やサインインを使わずに、表示と操作を確かめる）。
 
 いまの記録の写しから要約を書き出し、ビューアーの画面と一緒に 127.0.0.1 で開く。
 ビューアーで直した日報・滞在は写しのほうに取り込む（本物の記録は変えない）。
 
   python tools/preview_viewer.py             → http://127.0.0.1:8770/
+  python tools/preview_viewer.py --viewer-version 9.9.9   → 新しい版のビューアーのふり（PC が古いときの表示を試す）
 """
 
 import argparse
@@ -61,7 +62,9 @@ def sync_loop(out: Path):
         time.sleep(5)
 
 
-def make_handler(out: Path):
+def make_handler(out: Path, viewer_version: str):
+    config = f"window.LABLOG_CLOUD = {json.dumps({'dev': 'devdata/', 'version': viewer_version})};".encode()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             pass
@@ -81,7 +84,7 @@ def make_handler(out: Path):
         def do_GET(self):
             url = unquote(urlparse(self.path).path)
             if url == "/config.js":
-                return self._send(200, b'window.LABLOG_CLOUD = { dev: "devdata/" };', TYPES[".js"])
+                return self._send(200, config, TYPES[".js"])
             if url == "/devdata/edits/":
                 names = sorted(p.name for p in (out / "edits").glob("*.json")) if (out / "edits").is_dir() else []
                 return self._send(200, json.dumps(names).encode(), TYPES[".json"])
@@ -116,6 +119,7 @@ def main():
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--source", default=str(Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LabLog"),
                         help="写す元の記録のフォルダ")
+    parser.add_argument("--viewer-version", help="ビューアーの版（初めはいまの LabLog の版）")
     args = parser.parse_args()
 
     work = Path(tempfile.mkdtemp(prefix="lablog_preview_"))
@@ -124,9 +128,10 @@ def main():
     out = work / "onedrive"
     out.mkdir()
     sys.path.insert(0, str(ROOT))
+    from lablog import __version__
     threading.Thread(target=sync_loop, args=(out,), daemon=True).start()
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(out))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(out, args.viewer_version or __version__))
     print(f"ビューアーの試用: http://127.0.0.1:{args.port}/（書き出し先: {out}）", flush=True)
     server.serve_forever()
 

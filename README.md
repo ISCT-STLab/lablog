@@ -44,7 +44,7 @@
 | 手動で記録する | 日別画面の「入室する」 | 日別画面の「退室する」（押し忘れたまま 4 時間操作がなければ、最後に操作した時刻で退室） |
 | 記録しない | — | — （PC作業時間だけを記録し、場所は「自宅」か「その他」として数える） |
 
-- **Wi-Fi の登録**：研究室にいるときに、設定の画面で「研究室として登録」を押します。研究室専用と大学共通の Wi-Fi（ScienceTokyo など）は、どちらも登録します。eduroam や Wi2 は他の場所にもあるので登録しません。iPhone のテザリングのように研究室でも外でも使う Wi-Fi は「判定に使わない」にします。
+- **Wi-Fi の登録**：研究室にいるときに、設定の画面で「研究室として登録」を押します。研究室専用と大学共通の Wi-Fi（ScienceTokyo など）は、どちらも登録します。eduroam や Wi2 は他の場所にもあるので登録しません。スマホのテザリングのように研究室でも外でも使う Wi-Fi は「判定に使わない」にします。
 - **手動の入室・退室**：「記録しない」以外では、日別画面の研究室のタイルにある「入室する」「退室する」で切り替えられます。押し忘れたときは「時刻を指定…」で、実際に来た時刻・帰った時刻を入れられます。
 - **リモートデスクトップ**：Windows のリモートデスクトップで外から操作している間は、研究室にいないとみなし、作業時間は「自宅」として数えます（Chrome リモートデスクトップなど、画面をそのまま映すソフトは見分けられません）。
 - **滞在時間** は、PC を閉じてゼミに出ていた時間（仮退出から戻るまで）も含みます。**PC作業時間** は、5 分以上操作がなかった時間（離席）を除き、研究室・自宅・その他に分けて集計します。
@@ -112,19 +112,19 @@ Wi-Fi を切った状態でも日報を作れるので、外部に送ってい�
 - 見た目を確かめるときは、URL に `?level=4` を付けるとフローを固定できます（例：`http://127.0.0.1:8765/?level=4`）。
 - 日報は罫線入りのノート風に、手書き風の文字で表示します。文字は Klee One（SIL Open Font License 1.1。`lablog/web/fonts/OFL.txt`）を日本語の常用範囲に絞って同梱しています。
 
-## iPhone・iPad で見る
+## スマホで見る
 
-PC と同じ画面を、iPhone・iPad の Safari で開けるビューアーがあります（URL は設定の画面の「iPhone・iPad で見る」に出ます）。
-Safari の共有ボタン →「ホーム画面に追加」で、アプリと同じようにアイコンから開けます。
+PC と同じ画面を、スマホ（iPhone・Android）やタブレットのブラウザで開けるビューアーがあります（URL は設定の画面の「スマホで見る」に出ます）。
+ホーム画面に追加すると、アプリと同じようにアイコンから開けます（iPhone は Safari の共有ボタン →「ホーム画面に追加」、Android は Chrome のメニュー →「ホーム画面に追加」）。
 
 - **必要なもの**：個人の Microsoft アカウントと、この PC で同期している個人用の OneDrive（大学の Microsoft アカウントでは使えません）。
 - **しくみ**：PC の LabLog が要約を OneDrive のアプリ専用フォルダ（`OneDrive\アプリ\LabLog`）に書き出し、ビューアーは個人の Microsoft アカウントでサインインしてそれを読みます。ビューアーが触れるのはこのフォルダだけです。
 - **OneDrive に置くもの**：入退室・滞在時間・PC作業時間（大学／自宅）・分類別の時間・タイムラインの分類・日報。
 - **PC だけに残すもの**：ウィンドウ名、閲覧したページ、編集・使用したファイル、Git、Wi-Fi 名。記録そのもの（`lablog.db`）も OneDrive には置きません。
 - **書き出すタイミング**：5 分ごと（変わった分だけ）と、入退室・日報の作成・保存・滞在の修正のとき。設定の「今すぐ書き出す」でもすぐ書き出せます。
-- **iPhone・iPad で直す**：日報の書き直しと滞在の追加・修正・削除ができます。直した内容は OneDrive の `edits` に置かれ、PC の LabLog が次に動いたとき（30 秒ごとに確認）に取り込みます。それまでは「PC へ反映待ち」と表示します。
+- **スマホで直す**：日報の書き直しと滞在の追加・修正・削除ができます。直した内容は OneDrive の `edits` に置かれ、PC の LabLog が次に動いたとき（30 秒ごとに確認）に取り込みます。それまでは「PC へ反映待ち」と表示します。
 - **始め方**：ビューアーを開いてサインインすると、OneDrive に `アプリ\LabLog` フォルダができます。PC の LabLog は目印の `viewer.json` を見つけると（数分以内）、書き出しを始めます。
-- 書き出しを止めたいときは、設定の「iPhone・iPad で見る」で「OneDrive に書き出す」を外します。
+- 書き出しを止めたいときは、設定の「スマホで見る」で「OneDrive に書き出す」を外します。
 
 ## データの保存場所
 
@@ -163,6 +163,14 @@ Safari の共有ボタン →「ホーム画面に追加」で、アプリと同
 3. `python tools/release.py` で、`dist/LabLog-<版>.zip` を作ります。
 4. GitHub の [Releases](https://github.com/ISCT-STLab/lablog/releases) で「Draft a new release」を押し、タグを `v<版>` にして、ZIP を添付し、変更点を書いて公開します。テスト版のときは「Set as a pre-release」に印を付けます。
    - `gh` を入れていれば：`gh release create v<版> dist/LabLog-<版>.zip --title "LabLog <版>" --notes-file <変更点.md>`（テスト版は `--prerelease` を付ける）
-5. ブラウザ版（ビューアー）の画面も変えたときは、`python tools/publish_viewer.py --push` で公開し直します。
+5. ブラウザ版（ビューアー）を公開し直します：安定版は `python tools/publish_viewer.py --push`、テスト版は `python tools/publish_viewer.py --beta --push`（`…/lablog/beta/` に置きます）。ブラウザ版は、自分より古い PC の LabLog を見ると「更新してください」と知らせます。
 
 LabLog の「更新を確認」は、GitHub の API を認証なしで使います。リポジトリが公開されていないと、新しい版を見つけられません。
+
+### ブラウザ版を研究室の組織に移す（最初のリリースのときに一度だけ）
+
+1. GitHub で `ISCT-STLab/lablog` を Public にします（無料のプランでは、GitHub Pages は公開リポジトリだけで使えます）。
+2. 新しい公開用フォルダから送ります：`python tools/publish_viewer.py --site ..\lablog-pages --push` と、`python tools/publish_viewer.py --site ..\lablog-pages --beta --push`（`ISCT-STLab/lablog` の gh-pages ブランチに送ります）。
+3. リポジトリの Settings → Pages で、gh-pages ブランチを公開します（`https://isct-stlab.github.io/lablog/`）。
+4. Microsoft のアプリ登録（Azure portal → アプリの登録 → 認証）のリダイレクト URI に、`https://isct-stlab.github.io/lablog/` と `https://isct-stlab.github.io/lablog/beta/` を足します。
+5. 自分の `settings.json` の `cloud.viewer_url` を空にします（空なら配布元のブラウザ版を使います）。前のブラウザ版（`kkosugitm.github.io/lablog`）は、移し終えてから消します。

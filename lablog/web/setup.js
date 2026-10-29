@@ -291,7 +291,7 @@ async function setupWifi(el) {
   el.innerHTML = `
     <p>研究室にいるときにつながっている Wi-Fi を「研究室」として登録すると、入退室を自動で判定できます。
       研究室専用の Wi-Fi と、大学共通の Wi-Fi（ScienceTokyo など）は、どちらも「研究室」にします。</p>
-    <p class="help">eduroam や Wi2 は他の場所にもあるので、登録しないでください。iPhone のテザリングなど、研究室でも外でも使う Wi-Fi は「判定に使わない」にします。登録していない Wi-Fi は「大学の外」とみなします。</p>
+    <p class="help">eduroam や Wi2 は他の場所にもあるので、登録しないでください。スマホのテザリングなど、研究室でも外でも使う Wi-Fi は「判定に使わない」にします。登録していない Wi-Fi は「大学の外」とみなします。</p>
     <p>いまつながっている Wi-Fi：<b>${esc(current || "なし")}</b>（${where}）</p>
     <div class="row">
       <button class="btn btn-primary" data-wifi="univ" ${current ? "" : "disabled"}>研究室として登録</button>

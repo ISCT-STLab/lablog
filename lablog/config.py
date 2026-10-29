@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
     # off（記録しない）。away_min：activity のとき、手元の操作がこれだけないと仮退出にする（分）。
     # place：off のとき、PC作業時間の場所として数える所（home：自宅 / other：その他）
     "presence": {"mode": "wifi", "away_min": 15, "remote": "none", "place": "home"},
-    # ignore：判定に使わない Wi-Fi（iPhone のテザリングなど、大学でも大学の外でも使うもの）
+    # ignore：判定に使わない Wi-Fi（スマホのテザリングなど、大学でも大学の外でも使うもの）
     "wifi": {"univ": [], "home": [], "ignore": []},
     "watch_folders": [],
     # 記録する材料。apps：title（アプリ名とウィンドウ名）/ app（アプリ名だけ）/ off（作業時間だけ）
@@ -141,7 +141,7 @@ DEFAULT_SETTINGS = {
     # ウィンドウ名から作業内容が分からないアプリの補い方
     "claude_code": {"enabled": True},  # Claude Code の会話の題名・作業フォルダ（中身は読まない）
     "screen_text": {"enabled": True, "apps": SCREEN_TEXT_APPS, "interval_min": 5, "keep_days": 3},
-    # iPhone・iPad 用ビューアーへの書き出し（要約だけ）。folder が空なら OneDrive のアプリフォルダを自動で探す。
+    # スマホ用ビューアーへの書き出し（要約だけ）。folder が空なら OneDrive のアプリフォルダを自動で探す。
     "cloud": {"enabled": True, "folder": "", "viewer_url": ""},
     # 更新の確認（設定の画面のボタンを押したときだけ）。channel：stable（安定版）/ beta（テスト版も受け取る）
     "update": {"channel": "stable"},
