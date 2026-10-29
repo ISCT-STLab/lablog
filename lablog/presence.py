@@ -1,5 +1,12 @@
 """大学での滞在（入室・仮退出・退出確定）の判定。
 
+PC の使い方（設定の presence.mode）で、判定に使うものが変わる（judge_net）。
+- carry（持ち帰る）：Wi-Fi と操作の有無で、下のルールのとおりに判定する
+- stay（研究室に置いたまま）：手元で操作しているかどうか。操作中を「大学の Wi-Fi」、操作していない・
+  ロック中・リモートデスクトップ中を「Wi-Fi が切れた」とみなして、同じルールで判定する
+- home（自宅の PC）：判定しない
+どの使い方でも、リモートデスクトップで操作している間は研究室にいないとみなす。
+
 ルール
 - 大学の Wi-Fi につながる → 入室（仮退出中なら取り消して滞在を続ける）
 - Wi-Fi が切れる（スリープ・シャットダウンを含む） → 仮退出
@@ -8,9 +15,42 @@
 - 大学の Wi-Fi のまま leave_after 操作がない → 最後に操作した時刻で退出確定
 - 判定に使わない Wi-Fi（テザリングなど）につながる → そのときの状態を続ける
   （在学中なら滞在を続け、仮退出中なら仮退出のまま。新しく入室にはしない）
+
+手動（ダッシュボードのボタン）
+- 入室 → すぐに入室。その滞在は、未登録の Wi-Fi につないでも閉じない（判定に使わない Wi-Fi と同じ扱い）
+- 退室 → いま退出確定。研究室を一度離れたと分かるまで（大学の Wi-Fi から離れる・操作をやめる）、
+  自動では入室にしない（押したあとも研究室の Wi-Fi のまま・操作したままのことが多いため）
 """
 
-from .wifi import IGNORED, OFFLINE, UNIV
+from .db import kv_get, kv_set
+from .wifi import IGNORED, LOCATION_LABELS, OFFLINE, OTHER, UNIV
+
+MANUAL_KEY = "presence_manual_stay"  # 手動で入室した滞在の id
+SUPPRESS_KEY = "presence_suppress"   # "1"：手動で退室したので、自動の入室を止めている
+
+
+def judge_net(mode: str, wifi_net: str, local_active: bool, remote: bool) -> str:
+    """判定に使う「つながり」（Presence.tick に渡すもの）。"""
+    if mode == "home":
+        return OTHER
+    if remote:
+        return OFFLINE
+    if mode == "stay":
+        return UNIV if local_active else OFFLINE
+    return wifi_net
+
+
+def work_location(mode: str, wifi_net: str, state: str, remote: bool) -> str:
+    """作業していた場所（segments.location に記録する名前）。"""
+    if remote:
+        return "自宅"  # リモートデスクトップ：外からこの PC に入っている
+    if mode == "stay":
+        return "大学"
+    if mode == "home":
+        return "自宅"
+    if wifi_net == IGNORED:  # テザリングなど：滞在中なら大学での作業とみなす
+        return "大学" if state == "in" else "その他"
+    return LOCATION_LABELS[wifi_net]
 
 
 class Presence:
@@ -31,13 +71,50 @@ class Presence:
         """1 回分の判定。起きたこと（"opened" / "closed", 滞在 id）の一覧を返す。"""
         events: list[tuple[str, int]] = []
         stay = self.open_stay()
+        manual = kv_get(self.conn, MANUAL_KEY) or ""
         if stay is not None:
-            stay = self._advance(stay, now, net, idle, events)
-        if stay is None and net == UNIV and idle < self.idle_threshold:
-            cur = self.conn.execute("INSERT INTO stays (start_ts, last_seen_ts, status) VALUES (?, ?, 'in')",
-                                    (now, now))
-            events.append(("opened", cur.lastrowid))
+            stay_net = IGNORED if net == OTHER and manual == str(stay["id"]) else net
+            stay = self._advance(stay, now, stay_net, idle, events)
+        if stay is None and manual:
+            kv_set(self.conn, MANUAL_KEY, "")
+        suppressed = kv_get(self.conn, SUPPRESS_KEY) == "1"
+        if suppressed and net != UNIV:  # 研究室を一度離れた
+            kv_set(self.conn, SUPPRESS_KEY, "0")
+            suppressed = False
+        if stay is None and net == UNIV and idle < self.idle_threshold and not suppressed:
+            events.append(("opened", self._open(now)))
         return events
+
+    def manual_enter(self, now: float) -> list[tuple[str, int]]:
+        """入室ボタン。仮退出中なら滞在を続け、そうでなければ新しく入室する。"""
+        events: list[tuple[str, int]] = []
+        stay = self.open_stay()
+        if stay is not None and stay["status"] == "tentative" and now - stay["tentative_since"] >= self.leave_after:
+            stay = self._close(stay, stay["tentative_since"], "timeout", events)
+        if stay is None:
+            stay_id = self._open(now)
+            events.append(("opened", stay_id))
+        else:
+            self._set(stay, status="in", tentative_since=None, last_seen_ts=now)
+            stay_id = stay["id"]
+        kv_set(self.conn, MANUAL_KEY, stay_id)
+        kv_set(self.conn, SUPPRESS_KEY, "0")
+        return events
+
+    def manual_leave(self, now: float) -> list[tuple[str, int]]:
+        """退室ボタン。いま（仮退出中なら仮退出した時刻）で退出を確定する。"""
+        events: list[tuple[str, int]] = []
+        stay = self.open_stay()
+        if stay is not None:
+            end = stay["tentative_since"] if stay["status"] == "tentative" else now
+            self._close(stay, end, "manual_out", events)
+        kv_set(self.conn, MANUAL_KEY, "")
+        kv_set(self.conn, SUPPRESS_KEY, "1")
+        return events
+
+    def _open(self, now: float) -> int:
+        cur = self.conn.execute("INSERT INTO stays (start_ts, last_seen_ts, status) VALUES (?, ?, 'in')", (now, now))
+        return cur.lastrowid
 
     def _advance(self, stay: dict, now: float, net: str, idle: float, events) -> dict | None:
         if stay["status"] == "in" and now - stay["last_seen_ts"] > self.gap:

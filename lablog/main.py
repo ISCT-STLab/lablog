@@ -13,22 +13,22 @@ import webbrowser
 from datetime import timedelta
 
 from . import db, wifi
-from .activity import ActivityRecorder
+from .activity import IDLE_EXES, ActivityRecorder
 from .cloud import CloudSync
 from .collectors import (commit_reminders, discover_repos, import_browser_history, import_claude_code,
                          import_recent_files, poll_repo)
 from .config import Settings, dashboard_key, data_dir
 from .days import day_range, fmt_duration, logical_date
 from .filewatch import FileEventSink, WatcherManager
-from .presence import Presence
+from .presence import Presence, judge_net, work_location
 from .report import generate_report
 from .screentext import ScreenTextRecorder
 from .server import make_server
-from .winapi import acquire_single_instance, foreground_window, idle_seconds, show_toast
+from .winapi import acquire_single_instance, foreground_window, idle_seconds, is_remote_session, show_toast
 
 log = logging.getLogger("lablog")
 
-WIFI_CHECK_SEC = 15
+PRESENCE_CHECK_SEC = 15  # 入退室の判定（Wi-Fi の確認）の間隔
 COLLECT_SEC = 300
 SCREEN_TEXT_CHECK_SEC = 15
 REPO_DISCOVER_SEC = 1800
@@ -45,6 +45,7 @@ class App:
                         "location": "その他", "idle": 0, "started": time.time()}
         self._status_lock = threading.Lock()
         self._pause_lock = threading.Lock()
+        self.presence_lock = threading.Lock()  # 自動の判定と、手動の入室・退室が同時に滞在を書き換えないように
         self.repos: list[str] = []
         self._repos_stale = True
         self._wake = threading.Event()
@@ -98,6 +99,33 @@ class App:
         """ファイル編集を記録する設定のときだけ、監視フォルダを見張る。"""
         return self.settings.get("watch_folders") if self._record().get("files", True) else []
 
+    def _presence_settings(self, presence: Presence):
+        presence.leave_after = self.settings.get("leave_after_hours") * 3600
+        presence.idle_threshold = self.settings.get("idle_threshold_min") * 60
+
+    def _presence_events(self, conn, events):
+        for kind, stay_id in events:
+            row = conn.execute("SELECT * FROM stays WHERE id = ?", (stay_id,)).fetchone()
+            log.info("滞在 %s: id=%s %s", kind, stay_id, dict(row) if row else "")
+            if row:
+                self.cloud.mark_dirty(logical_date(row["start_ts"]))
+            if kind == "closed" and row:
+                self.queue_report(logical_date(row["start_ts"]), "退出確定")
+
+    def manual_presence(self, action: str) -> dict:
+        """ダッシュボードの入室・退室ボタン。"""
+        conn = db.thread_conn()
+        presence = Presence(conn)
+        self._presence_settings(presence)
+        now = time.time()
+        with self.presence_lock:
+            events = presence.manual_enter(now) if action == "enter" else presence.manual_leave(now)
+        self._presence_events(conn, events)
+        self.cloud.mark_dirty(logical_date(now))
+        log.info("手動で%sしました", "入室" if action == "enter" else "退室")
+        self._set_status(**presence.status_view(now))
+        return self.status_snapshot()
+
     def queue_report(self, d, reason: str):
         if self.settings.get("ollama").get("auto", True):
             self.report_jobs.put((d, reason))
@@ -109,36 +137,40 @@ class App:
         s = self.settings
         presence = Presence(conn)
         recorder = ActivityRecorder(conn, s.get("sample_interval_sec"))
-        last_wifi = 0.0
+        last_check = 0.0
         net, ssids, wifi_error = wifi.OFFLINE, [], None
+        last_local = 0.0  # 最後に手元で操作した時刻（リモートデスクトップ中・ロック中の操作は含めない）
         last_day = logical_date(time.time())
         while True:
             started = time.time()
             interval = s.get("sample_interval_sec")
             try:
                 idle_threshold = s.get("idle_threshold_min") * 60
-                presence.leave_after = s.get("leave_after_hours") * 3600
-                presence.idle_threshold = idle_threshold
+                self._presence_settings(presence)
+                pcfg = s.get("presence")
+                mode = pcfg.get("mode", "carry")
                 recorder.interval = interval
                 now = time.time()
                 idle = idle_seconds()
                 fg = foreground_window()
-                if now - last_wifi >= WIFI_CHECK_SEC:
-                    last_wifi = now
-                    ssids, wifi_error = wifi.current_ssids()
-                    net = wifi.classify(ssids, s.get("wifi"))
-                    for kind, stay_id in presence.tick(now, net, idle):
-                        row = conn.execute("SELECT * FROM stays WHERE id = ?", (stay_id,)).fetchone()
-                        log.info("滞在 %s: id=%s %s", kind, stay_id, dict(row) if row else "")
-                        if row:
-                            self.cloud.mark_dirty(logical_date(row["start_ts"]))
-                        if kind == "closed" and row:
-                            self.queue_report(logical_date(row["start_ts"]), "退出確定")
+                remote = is_remote_session()
+                locked = fg is not None and fg[0].lower() in IDLE_EXES
+                if not remote and not locked:
+                    last_local = max(last_local, now - idle)
+                local_idle = now - last_local
+                local_active = not remote and not locked and local_idle < pcfg.get("away_min", 15) * 60
+                if now - last_check >= PRESENCE_CHECK_SEC:
+                    last_check = now
+                    if mode == "carry":
+                        ssids, wifi_error = wifi.current_ssids()
+                        net = wifi.classify(ssids, s.get("wifi"))
+                    else:  # Wi-Fi は判定に使わない
+                        ssids, wifi_error, net = [], None, wifi.OFFLINE
+                    with self.presence_lock:
+                        events = presence.tick(now, judge_net(mode, net, local_active, remote), local_idle)
+                    self._presence_events(conn, events)
                 view = presence.status_view(now)
-                if net == wifi.IGNORED:  # テザリングなど：滞在中なら大学での作業とみなす
-                    location = "大学" if view["state"] == "in" else "その他"
-                else:
-                    location = wifi.LOCATION_LABELS[net]
+                location = work_location(mode, net, view["state"], remote)
                 excluded = {e.lower() for e in s.get("excluded_apps")}
                 recorder.tick(now, fg, idle, idle_threshold, location, excluded, self._paused,
                               self._record().get("apps", "title"))
@@ -147,7 +179,7 @@ class App:
                     self.queue_report(last_day, "日付の切り替わり")
                     last_day = today
                 self._set_status(**view, net=net, ssids=ssids, wifi_error=wifi_error,
-                                 location=location, idle=idle, last_tick=now)
+                                 location=location, idle=idle, last_tick=now, mode=mode, remote=remote)
             except Exception:
                 log.exception("記録中にエラーが起きました")
             time.sleep(max(1.0, interval - (time.time() - started)))

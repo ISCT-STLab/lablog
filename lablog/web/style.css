@@ -226,8 +226,12 @@ input:focus, textarea:focus, select:focus, .btn:focus-visible, a:focus-visible {
 textarea { width: 100%; resize: vertical; line-height: 1.7; }
 label.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 /* 記録する材料：1 行に 1 つ。説明が折り返しても、チェックボックスは 1 行目にそろえる */
-#record-form label.check { display: flex; align-items: flex-start; margin: 6px 0; }
-#record-form label.check input { margin-top: 3px; flex: none; }
+#record-form label.check, #judge-form label.check { display: flex; align-items: flex-start; margin: 6px 0; }
+:is(#record-form, #judge-form) label.check input { margin-top: 3px; flex: none; }
+#judge-form label.check .help { margin: 2px 0 0; }
+/* 研究室のタイルの下：手動の入室・退室 */
+.stay-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px;
+                font-size: calc(12px * var(--fs)); }
 /* タッチ端末：入力欄を選んだときに iPhone が画面を拡大しないよう 16px 以上にする */
 @media (hover: none) {
   input[type=text], input[type=number], input[type=datetime-local], input[type=date], textarea, select { font-size: calc(16px * var(--fs)); }

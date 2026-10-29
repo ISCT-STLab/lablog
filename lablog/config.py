@@ -121,6 +121,9 @@ DEFAULT_SETTINGS = {
     "sample_interval_sec": 5,
     "idle_threshold_min": 5,
     "leave_after_hours": 4,
+    # 入退室の判定。mode：carry（持ち帰る。Wi-Fi で判定）/ stay（研究室に置いたまま。手元の操作で判定）/
+    # home（自宅の PC。判定しない）。away_min：stay のとき、手元の操作がこれだけないと仮退出にする（分）
+    "presence": {"mode": "carry", "away_min": 15},
     # ignore：判定に使わない Wi-Fi（iPhone のテザリングなど、大学でも大学の外でも使うもの）
     "wifi": {"univ": [], "home": [], "ignore": []},
     "watch_folders": [],
@@ -194,6 +197,14 @@ def _cloud(value):
 
 
 APP_RECORD_MODES = ("title", "app", "off")
+PRESENCE_MODES = ("carry", "stay", "home")
+
+
+def _presence(value):
+    mode = value.get("mode", "carry")
+    if mode not in PRESENCE_MODES:
+        raise ValueError("PC の使い方が正しくありません")
+    return {"mode": mode, "away_min": _number(1, 120)(value.get("away_min", 15))}
 
 
 def _record(value):
@@ -233,6 +244,7 @@ VALIDATORS = {
     "sample_interval_sec": _number(2, 60, int),
     "idle_threshold_min": _number(1, 60),
     "leave_after_hours": _number(1, 24),
+    "presence": _presence,
     "wifi": _wifi,
     "watch_folders": _str_list,
     "record": _record,

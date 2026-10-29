@@ -206,6 +206,9 @@ const NET_LABEL = { univ: "研究室", home: "自宅", ignored: "判定に使わ
 // 記録の中の場所の名前（"大学" など）は変えず、表示するときだけ置き換える
 const PLACE_LABEL = { "大学": "研究室" };
 const placeName = (key) => PLACE_LABEL[key] || key;
+// PC の使い方（carry：持ち帰る / stay：研究室に置いたまま / home：自宅の PC）。ビューアーでは設定が無いので carry
+const presenceMode = () => (state.settings && state.settings.settings.presence || {}).mode || "carry";
+const leaveHours = () => (state.settings && state.settings.settings.leave_after_hours) || 4;
 
 function renderStatus() {
   const s = state.status;
@@ -215,11 +218,18 @@ function renderStatus() {
   if (s.paused) {
     parts.push(`<span class="pill paused"><span class="dot"></span>記録を一時停止中</span>`);
   }
-  // 在室中かどうかは研究室のタイルに出すので、上部バーには Wi-Fi だけを出す
-  const net = s.ssids && s.ssids.length
-    ? `Wi-Fi：${esc(s.ssids.join(", "))}${NET_LABEL[s.net] ? `（${NET_LABEL[s.net]}）` : ""}`
-    : "Wi-Fi：未接続";
-  parts.push(`<span class="net">${net}</span>`);
+  if (s.remote) parts.push(`<span class="pill"><span class="dot"></span>リモートデスクトップで接続中</span>`);
+  // 在室中かどうかは研究室のタイルに出すので、上部バーには判定に使っているもの（Wi-Fi など）だけを出す
+  // 設定を読めていれば設定のほう（保存した直後から切り替わる。記録の処理から届く s.mode は数秒遅れる）
+  const mode = state.settings ? presenceMode() : (s.mode || "carry");
+  if (mode === "carry") {
+    const net = s.ssids && s.ssids.length
+      ? `Wi-Fi：${esc(s.ssids.join(", "))}${NET_LABEL[s.net] ? `（${NET_LABEL[s.net]}）` : ""}`
+      : "Wi-Fi：未接続";
+    parts.push(`<span class="net">${net}</span>`);
+  } else {
+    parts.push(`<span class="net">${mode === "stay" ? "入退室：この PC の操作で判定" : "自宅の PC（入退室は記録しません）"}</span>`);
+  }
   $("#status").innerHTML = parts.join("");
   const btn = $("#pause");
   const label = s.paused ? "記録を再開" : "記録を一時停止";
@@ -250,8 +260,9 @@ function renderNotices() {
     if (s.offline) items.push(["warn", "インターネットにつながらないため、前に読み込んだ内容を表示しています。"]);
     if (s.pending) items.push(["warn", `直した内容（${s.pending} 件）は、PC の LabLog が次に動いたときに反映されます。`]);
   }
-  if (s && s.wifi_error) items.push(["error", esc(s.wifi_error)]);
-  if (settings && !settings.wifi.univ.length) {
+  const carry = presenceMode() === "carry";
+  if (carry && s && s.wifi_error) items.push(["error", esc(s.wifi_error)]);
+  if (carry && settings && !settings.wifi.univ.length) {
     items.push(["warn", `研究室の Wi-Fi がまだ登録されていません。研究室にいるときに <a href="#/settings">設定</a> の「研究室として登録」を押してください（研究室専用と大学共通の Wi-Fi の両方）。`]);
   }
   if (settings && !settings.watch_folders.length) {
@@ -542,6 +553,20 @@ async function renderDay(dateArg, { keepScroll = false } = {}) {
   pick.addEventListener("change", (e) => { if (e.target.value) location.hash = `#/day/${e.target.value}`; });
   pick.addEventListener("click", () => { try { pick.showPicker(); } catch { /* 対応していないブラウザは標準の動き */ } });
   $("#add-stay").addEventListener("click", () => openStayForm(day, null));
+  const presenceBtn = $("#presence-btn");
+  if (presenceBtn) presenceBtn.addEventListener("click", async () => {
+    const action = presenceBtn.dataset.action;
+    presenceBtn.disabled = true;
+    try {
+      state.status = await api.post("/api/presence", { action });
+      renderStatus();
+      flash(action === "enter" ? "入室にしました" : "退室にしました");
+      await renderDay(dateArg, { keepScroll: true });
+    } catch (err) {
+      alert(err.message);
+      presenceBtn.disabled = false;
+    }
+  });
   $$("[data-edit-stay]").forEach((b) => b.addEventListener("click", () =>
     openStayForm(day, day.stays.find((s) => s.id === Number(b.dataset.editStay)))));
   if (keepScroll) window.scrollTo(0, scrollY);
@@ -621,7 +646,8 @@ function stayHTML(day) {
       <div class="stay-span empty">
         <span class="cap io">${ICON_IN}IN</span><span class="total muted">研究室には来ていません</span><span class="cap right io">OUT${ICON_OUT}</span>
         <span class="t">—</span><span class="track"></span><span class="t right">—</span>
-      </div>`;
+      </div>
+      ${presenceActionsHTML(day)}`;
   }
   const first = stays[0].start, last = stays[stays.length - 1];
   const end = Math.max(...stays.map((s) => s.end));
@@ -638,7 +664,8 @@ function stayHTML(day) {
   const exit = last.state === "in" ? { t: "—", cls: "pending", cap: "OUT" }
     : last.state === "tentative" ? { t: fmtHMDay(last.end, t0), cls: "tentative", cap: "OUT（仮）" }
     : { t: fmtHMDay(last.end, t0), cls: "out", cap: "OUT" };
-  const foot = last.state === "tentative" ? "仮退出から4時間以内に研究室の Wi-Fi に戻れば、滞在が続きます"
+  const back = presenceMode() === "stay" ? "この PC を操作すれば" : "研究室の Wi-Fi に戻れば";
+  const foot = last.state === "tentative" ? `仮退出から${leaveHours()}時間以内に${back}、滞在が続きます`
     : stays.length > 1 ? `出入り ${stays.length} 回。点線のあいだ（研究室の外）は滞在時間に含めません` : "";
   return `<div class="label">研究室</div>
     <div class="stay-span">
@@ -649,7 +676,19 @@ function stayHTML(day) {
       <span class="track ${esc(last.state)}">${segs}<i class="dot start"></i><i class="dot end"></i>${last.state === "in" ? `<span class="now-badge">在室中</span>` : ""}</span>
       <span class="t num right ${last.state === "in" ? "pending" : ""}">${esc(exit.t)}</span>
     </div>
-    ${foot ? `<div class="foot">${foot}</div>` : ""}`;
+    ${foot ? `<div class="foot">${foot}</div>` : ""}
+    ${presenceActionsHTML(day)}`;
+}
+
+// 今日の画面だけに出す、手動の入室・退室のボタン（自宅の PC とビューアーでは出さない）
+function presenceActionsHTML(day) {
+  if (cloud || !day.is_today || presenceMode() === "home") return "";
+  const st = state.status && state.status.state;
+  const inLab = st === "in" || st === "tentative";
+  return `<div class="stay-actions">
+      <button class="btn btn-sm" id="presence-btn" data-action="${inLab ? "leave" : "enter"}">${inLab ? "退室する" : "入室する"}</button>
+      <span class="muted">${inLab ? "研究室を出るときに押すと、いまの時刻で退室にします" : "自動で入室にならないときは、ここで入室にできます"}</span>
+    </div>`;
 }
 
 function timelineHTML(day, names) {
@@ -715,16 +754,20 @@ function categoryBarsHTML(day, names) {
     </div>`).join("")}</div>`;
 }
 
-const REASON = { offcampus: "研究室以外の Wi-Fi に接続", timeout: "4時間戻らず", idle: "4時間操作なし", manual: "手動で修正" };
+function reasonLabel(reason) {
+  const h = leaveHours();
+  return { offcampus: "研究室以外の Wi-Fi に接続", timeout: `${h}時間戻らず`, idle: `${h}時間操作なし`,
+           manual: "手動で修正", manual_out: "手動で退室" }[reason] || reason;
+}
 
 function staysHTML(day) {
-  if (!day.stays.length) return `<div class="empty">この日は研究室の Wi-Fi への接続がありません。</div>`;
+  if (!day.stays.length) return `<div class="empty">この日は研究室にいた記録がありません。</div>`;
   return `<div class="stay-list">${day.stays.map((s) => `
     <div class="stay-row">
       <span class="time">${fmtHMDay(s.start, day.range[0])} 〜 ${s.state === "in" ? "在室中" : fmtHMDay(s.end, day.range[0])}</span>
       <span class="ink2">${fmtDur(s.duration)}</span>
       ${s.state === "tentative" ? `<span class="tag warn">仮退出中</span>` : ""}
-      ${s.reason ? `<span class="tag">${esc(REASON[s.reason] || s.reason)}</span>` : ""}
+      ${s.reason ? `<span class="tag">${esc(reasonLabel(s.reason))}</span>` : ""}
       ${s.pending ? `<span class="tag warn">PC へ反映待ち</span>` : ""}
       <span class="spacer"></span>
       ${s.id == null ? "" : `<button class="btn btn-sm btn-ghost" data-edit-stay="${s.id}">編集</button>`}
@@ -1112,6 +1155,8 @@ async function renderSettings() {
   const catNames = s.categories.map((c) => c.name).concat(["その他"]);
 
   const rec = s.record;
+  const modeOption = (value, label, desc) => `<label class="check"><input type="radio" name="mode" value="${value}" ${s.presence.mode === value ? "checked" : ""}>
+      <span><b>${label}</b><br><span class="help">${desc}</span></span></label>`;
   const appsOption = (value, label) => `<option value="${value}" ${rec.apps === value ? "selected" : ""}>${label}</option>`;
 
   view.innerHTML = `
@@ -1135,7 +1180,26 @@ async function renderSettings() {
       </section>
 
       <section class="card">
+        <div class="card-head"><h2>入退室の判定</h2></div>
+        <form id="judge-form">
+          <p class="help">この PC の使い方を選んでください。</p>
+          ${modeOption("carry", "持ち帰る", "研究室の Wi-Fi につながったら入室、研究室の外の Wi-Fi につながったら退室にします。ノート PC を持ち歩く人向けです。")}
+          ${modeOption("stay", "研究室に置いたまま", "この PC を手元で操作し始めたら入室、操作しなくなったら仮退出にします。デスクトップや、研究室に置いて帰るノート PC 向けです。")}
+          ${modeOption("home", "自宅の PC", "入退室は記録せず、作業時間だけを「自宅」として記録します。")}
+          <p class="help">どの使い方でも、Windows のリモートデスクトップで外から操作している間は研究室にいないとみなし、作業時間は「自宅」として数えます。日別画面の「入室する」「退室する」で、手動でも切り替えられます。</p>
+          <label class="field"><span>仮退出にするまでの時間（「研究室に置いたまま」のとき。手元の操作がない分数）</span>
+            <input type="number" name="away" min="1" max="120" step="1" value="${s.presence.away_min}" style="width:8em"></label>
+          <label class="field"><span>離席とみなす時間（操作がない分数。PC作業時間から除きます）</span>
+            <input type="number" name="idle" min="1" max="60" step="1" value="${s.idle_threshold_min}" style="width:8em"></label>
+          <label class="field"><span>退出を確定するまでの時間（仮退出・操作なしの時間数）</span>
+            <input type="number" name="leave" min="1" max="24" step="0.5" value="${s.leave_after_hours}" style="width:8em"></label>
+          <button class="btn btn-primary" type="submit">保存</button>
+        </form>
+      </section>
+
+      <section class="card">
         <div class="card-head"><h2>Wi-Fi の登録</h2></div>
+        ${s.presence.mode !== "carry" ? `<p class="help"><span class="tag">いまは使っていません</span> Wi-Fi で判定するのは、PC の使い方が「持ち帰る」のときだけです。</p>` : ""}
         <p class="help">いま接続中：<b>${esc(current || "なし")}</b>（${where}）</p>
         <div class="row">
           <button class="btn btn-primary" data-wifi-register="univ" ${current ? "" : "disabled"}>研究室として登録</button>
@@ -1220,17 +1284,6 @@ async function renderSettings() {
             <span class="spacer"></span>
             <button class="btn btn-primary" type="submit">保存</button>
           </div>
-        </form>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><h2>判定のしかた</h2></div>
-        <form id="judge-form">
-          <label class="field"><span>離席とみなす時間（操作がない分数）</span>
-            <input type="number" name="idle" min="1" max="60" step="1" value="${s.idle_threshold_min}" style="width:8em"></label>
-          <label class="field"><span>退出を確定するまでの時間（仮退出・操作なしの時間数）</span>
-            <input type="number" name="leave" min="1" max="24" step="0.5" value="${s.leave_after_hours}" style="width:8em"></label>
-          <button class="btn btn-primary" type="submit">保存</button>
         </form>
       </section>
 
@@ -1366,9 +1419,12 @@ async function renderSettings() {
     flash("読み取った文字を消しました");
     renderSettings();
   });
-  $("#judge-form").addEventListener("submit", (e) => {
+  $("#judge-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    saveSettings({ idle_threshold_min: Number(e.target.idle.value), leave_after_hours: Number(e.target.leave.value) });
+    const f = e.target;
+    const ok = await saveSettings({ presence: { mode: f.mode.value, away_min: Number(f.away.value) },
+      idle_threshold_min: Number(f.idle.value), leave_after_hours: Number(f.leave.value) });
+    if (ok) { renderSettings(); refreshStatus(); }
   });
   $("#exclude-form").addEventListener("submit", (e) => {
     e.preventDefault();

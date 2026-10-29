@@ -78,6 +78,17 @@ def idle_seconds() -> float:
     return ((now - info.dwTime) & 0xFFFFFFFF) / 1000.0
 
 
+SM_REMOTESESSION = 0x1000
+
+
+def is_remote_session() -> bool:
+    """Windows のリモートデスクトップで操作されているか（このプロセスのセッションがリモートか）。
+
+    Chrome リモートデスクトップなど、画面をそのまま映すソフトは手元のセッションのままなので見分けられない。
+    """
+    return bool(user32.GetSystemMetrics(SM_REMOTESESSION))
+
+
 def _exe_of_pid(pid: int) -> str:
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:

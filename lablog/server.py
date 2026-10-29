@@ -146,6 +146,14 @@ class Api:
         folders = [f for f in self.app.settings.get("watch_folders") if f != body.get("path")]
         return self.post_settings({"watch_folders": folders})
 
+    def post_presence(self, body):
+        action = body.get("action")
+        if action not in ("enter", "leave"):
+            raise ApiError("操作が正しくありません")
+        if self.app.settings.get("presence").get("mode") == "home":
+            raise ApiError("自宅の PC では入退室を記録しません（設定の「入退室の判定」で変えられます）")
+        return self.app.manual_presence(action)
+
     def post_pause(self, body):
         self.app.set_paused(bool(body.get("paused")))
         return self.app.status_snapshot()
@@ -216,7 +224,7 @@ POST_ROUTES = {"/api/settings": "post_settings", "/api/categories/reset": "post_
                "/api/wifi/register": "post_wifi_register",
                "/api/wifi/remove": "post_wifi_remove", "/api/folders/pick": "post_folders_pick",
                "/api/folders/add": "post_folders_add", "/api/folders/remove": "post_folders_remove",
-               "/api/pause": "post_pause", "/api/stay/save": "post_stay_save",
+               "/api/pause": "post_pause", "/api/presence": "post_presence", "/api/stay/save": "post_stay_save",
                "/api/stay/delete": "post_stay_delete", "/api/report/generate": "post_report_generate",
                "/api/report/save": "post_report_save", "/api/cloud/export": "post_cloud_export",
                "/api/screen_texts/clear": "post_screen_texts_clear"}
@@ -277,14 +285,18 @@ def make_handler(api: Api, key: str, port: int):
 
         def _call(self, fn, arg):
             try:
-                self._json(fn(arg))
+                result, status = fn(arg), 200
             except ApiError as exc:
-                self._json({"error": str(exc)}, 400)
+                result, status = {"error": str(exc)}, 400
             except (KeyError, ValueError) as exc:
-                self._json({"error": f"入力が正しくありません（{exc}）"}, 400)
+                result, status = {"error": f"入力が正しくありません（{exc}）"}, 400
             except Exception as exc:
                 log.exception("API でエラーが起きました")
-                self._json({"error": f"エラーが起きました（{exc}）"}, 500)
+                result, status = {"error": f"エラーが起きました（{exc}）"}, 500
+            try:
+                self._json(result, status)
+            except ConnectionError:  # 応答を返す前にブラウザが読み込みをやめた（再読み込みなど）
+                self.close_connection = True
 
         def do_GET(self):
             if not self._host_ok():
