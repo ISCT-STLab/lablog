@@ -226,9 +226,11 @@ input:focus, textarea:focus, select:focus, .btn:focus-visible, a:focus-visible {
 textarea { width: 100%; resize: vertical; line-height: 1.7; }
 label.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 /* 記録する材料：1 行に 1 つ。説明が折り返しても、チェックボックスは 1 行目にそろえる */
-#record-form label.check, #judge-form label.check { display: flex; align-items: flex-start; margin: 6px 0; }
-:is(#record-form, #judge-form) label.check input { margin-top: 3px; flex: none; }
-#judge-form label.check .help { margin: 2px 0 0; }
+#record-form label.check, #judge-form label.check, #update-form label.check { display: flex; align-items: flex-start; margin: 6px 0; }
+:is(#record-form, #judge-form, #update-form) label.check input { margin-top: 3px; flex: none; }
+:is(#judge-form, #update-form) label.check .help { margin: 2px 0 0; }
+.update-notes { max-height: 260px; overflow: auto; margin: 8px 0; padding: 8px 12px; border: 1px solid var(--border);
+                border-radius: 8px; font-size: calc(13px * var(--fs)); }
 /* ---- 初期設定（setup.js） ---- */
 .setup { max-width: 880px; margin: 0 auto; }
 .setup-steps { display: flex; flex-wrap: wrap; gap: 4px 6px; list-style: none; padding: 0; margin: 0 0 14px;

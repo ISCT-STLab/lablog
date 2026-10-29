@@ -269,6 +269,9 @@ function renderNotices() {
     if (s.offline) items.push(["warn", "インターネットにつながらないため、前に読み込んだ内容を表示しています。"]);
     if (s.pending) items.push(["warn", `直した内容（${s.pending} 件）は、PC の LabLog が次に動いたときに反映されます。`]);
   }
+  if (!cloud && s && s.update_failed) {
+    items.push(["error", `新しい版（${esc(s.update_failed)}）を起動できなかったため、前の版（${esc(s.version)}）に戻しました。困ったときは、LabLog を配った人に知らせてください。`]);
+  }
   const byWifi = presenceMode() === "wifi";
   if (byWifi && s && s.wifi_error) items.push(["error", esc(s.wifi_error)]);
   if (byWifi && settings && !settings.wifi.univ.length) {
@@ -1340,6 +1343,20 @@ async function renderSettings() {
         </form>
       </section>
 
+      <section class="card">
+        <div class="card-head"><h2>LabLog の更新</h2></div>
+        <p class="help" id="update-current">いまの版：確認中…</p>
+        <form id="update-form">
+          <label class="check"><input type="radio" name="channel" value="stable" ${s.update.channel === "stable" ? "checked" : ""}>
+            <span><b>安定版</b><br><span class="help">正式に公開された版だけを受け取ります。</span></span></label>
+          <label class="check"><input type="radio" name="channel" value="beta" ${s.update.channel === "beta" ? "checked" : ""}>
+            <span><b>テスト版</b><br><span class="help">公開前の版も受け取ります。新しい機能を先に試せますが、不具合があるかもしれません。</span></span></label>
+          <div class="row"><button class="btn btn-primary" type="submit">更新を確認</button></div>
+        </form>
+        <div id="update-result"></div>
+        <p class="help">「更新を確認」を押したときだけ、配布元（GitHub）に新しい版があるかを問い合わせます。送るのは版を尋ねるリクエストだけで、記録は送りません。</p>
+      </section>
+
       <section class="card span-2">
         <div class="card-head"><h2>分類のルール</h2>
           <span class="sub">上から順に色が決まります。ドメインの先頭に「=」を付けると完全一致（例：=google.com は検索だけ）</span></div>
@@ -1375,6 +1392,8 @@ async function renderSettings() {
     }
   });
   loadCloudState();
+  loadUpdateState();
+  $("#update-form").addEventListener("submit", (e) => { e.preventDefault(); checkUpdate(e.target.channel.value); });
   $("#cloud-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     if (await saveSettings({ cloud: { ...s.cloud, enabled: e.target.enabled.checked } })) loadCloudState();
@@ -1496,6 +1515,81 @@ async function renderSettings() {
     })).filter((c) => c.name);
     if (await saveSettings({ categories }, "分類を保存しました（過去の記録にも反映されます）")) renderSettings();
   });
+}
+
+// ------------------------------------------------------------ 更新（設定の画面の「LabLog の更新」）
+
+async function loadUpdateState() {
+  const u = await api.get("/api/update").catch(() => null);
+  const el = $("#update-current");
+  if (!el || !u) return;
+  state.serverStarted = u.started;
+  el.innerHTML = `いまの版：<b>${esc(u.current)}</b>${u.installed ? ""
+    : `<br><span class="tag">開発用</span> リポジトリのフォルダから動いているため、ここからは更新しません（git pull で更新します）。`}`;
+  if (u.job && ["running", "restarting", "error"].includes(u.job.state)) renderUpdateJob(u.job);
+}
+
+async function checkUpdate(channel) {
+  const out = $("#update-result");
+  out.innerHTML = `<p class="help">確認しています…</p>`;
+  let r;
+  try {
+    r = await api.post("/api/update/check", { channel });
+  } catch (err) {
+    out.innerHTML = `<p class="help"><span class="tag warn">確認できませんでした</span> ${esc(err.message)}</p>`;
+    return;
+  }
+  const rel = r.latest;
+  if (!rel) { out.innerHTML = `<p class="help">公開されている版が、まだありません。</p>`; return; }
+  if (!r.newer) { out.innerHTML = `<p class="help"><span class="tag">最新です</span> いまの版（${esc(r.current)}）が最新です。</p>`; return; }
+  const size = rel.size ? `約 ${(rel.size / 1024 / 1024).toFixed(1)} MB` : "";
+  const date = rel.published ? `、${new Date(rel.published).toLocaleDateString("ja-JP")} 公開` : "";
+  out.innerHTML = `
+    <p><b>新しい版 ${esc(rel.version)}</b> があります（${rel.prerelease ? "テスト版" : "安定版"}${date}）。</p>
+    ${rel.notes ? `<div class="md update-notes">${renderMarkdown(rel.notes)}</div>` : ""}
+    ${r.installed ? `
+      <div class="row"><button class="btn btn-primary" id="update-install">更新する（${size}）</button></div>
+      <p class="help">ダウンロードして切り替えたあと、LabLog を起動し直します。記録と設定はそのまま引き継ぎます。新しい版を起動できなかったときは、自動で前の版に戻します。</p>`
+    : `<p class="help">開発用のフォルダから動いているため、ここからは更新しません。</p>`}`;
+  const btn = $("#update-install");
+  if (btn) btn.addEventListener("click", async () => {
+    if (!confirm(`LabLog を ${rel.version} に更新します。よろしいですか？`)) return;
+    btn.disabled = true;
+    try {
+      renderUpdateJob(await api.post("/api/update/install", { version: rel.version }));
+    } catch (err) {
+      alert(err.message);
+      btn.disabled = false;
+    }
+  });
+}
+
+function renderUpdateJob(job) {
+  const out = $("#update-result");
+  if (!out) return;
+  if (job.state === "error") {
+    out.innerHTML = `<p class="help"><span class="tag warn">更新できませんでした</span> ${esc(job.message)}（いまの版のまま動いています）</p>`;
+    return;
+  }
+  const pct = job.progress == null ? null : Math.round(job.progress * 100);
+  out.innerHTML = `<p class="help">${esc(job.message || "")}${pct == null ? "" : `（${pct}%）`}</p>
+    <div class="progress ${pct == null ? "busy" : ""}"><i style="width:${pct ?? 0}%"></i></div>`;
+  if (job.state === "restarting") { waitForRestart(); return; }
+  if (job.state === "running") {
+    setTimeout(async () => { const u = await api.get("/api/update").catch(() => null); if (u) renderUpdateJob(u.job); }, 1000);
+  }
+}
+
+// 起動し直したら（サーバーが起動した時刻が変わったら）開き直す。止まっている時間は短く、確かめる合間に
+// 終わることもあるので、止まったかどうかでは判断しない（新しい版を起動できず前の版に戻ったときも、上部のお知らせで分かる）
+async function waitForRestart() {
+  for (let i = 0; i < 180; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const u = await api.get("/api/update").catch(() => null);
+    if (u && u.started !== state.serverStarted) { location.reload(); return; }
+  }
+  const out = $("#update-result");
+  if (out) out.innerHTML = `<p class="help"><span class="tag warn">起動し直すのに時間がかかっています</span> スタートメニューの LabLog から開き直してください。</p>`;
 }
 
 async function loadCloudState() {

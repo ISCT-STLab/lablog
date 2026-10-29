@@ -6,26 +6,31 @@ import logging
 import logging.handlers
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
 from datetime import timedelta
+from pathlib import Path
 
-from . import db, wifi
+from . import __version__, db, wifi
 from .activity import IDLE_EXES, ActivityRecorder
 from .aisetup import OllamaSetup
+from .update import Updater
 from .cloud import CloudSync
 from .collectors import (commit_reminders, discover_repos, import_browser_history, import_claude_code,
                          import_recent_files, poll_repo)
 from .config import Settings, dashboard_key, data_dir
 from .days import day_range, fmt_duration, logical_date
 from .filewatch import FileEventSink, WatcherManager
+from .install import install_base, read_versions
 from .presence import Presence, judge_net, work_location
 from .report import generate_report
 from .screentext import ScreenTextRecorder
 from .server import make_server
-from .winapi import acquire_single_instance, foreground_window, idle_seconds, is_remote_session, show_toast
+from .winapi import (CREATE_NO_WINDOW, acquire_single_instance, foreground_window, idle_seconds, is_remote_session,
+                     show_toast, wait_for_process)
 
 log = logging.getLogger("lablog")
 
@@ -42,8 +47,13 @@ class App:
         db.init(self.conn)
         self.port = self.settings.get("port")
         self._paused = db.kv_get(self.conn, "paused") == "1"
+        base = install_base()
+        installed = read_versions(base) if base else {}
+        # update_failed：更新した版を起動できず、ランチャーが前の版に戻したとき（launcher.pyw）
         self._status = {"state": "out", "net": wifi.OFFLINE, "ssids": [], "wifi_error": None,
-                        "location": "その他", "idle": 0, "started": time.time()}
+                        "location": "その他", "idle": 0, "started": time.time(), "version": __version__,
+                        "update_failed": installed.get("failed")}
+        self.extra_args: list[str] = []  # 起動し直すときに引き継ぐ引数（テスト用の --port・--data-dir）
         self._status_lock = threading.Lock()
         self._pause_lock = threading.Lock()
         self.presence_lock = threading.Lock()  # 自動の判定と、手動の入室・退室が同時に滞在を書き換えないように
@@ -55,6 +65,7 @@ class App:
         self.watchers = WatcherManager(self.sink)
         self.cloud = CloudSync(self.settings, self.status_snapshot)
         self.ollama_setup = OllamaSetup(self.settings)
+        self.updater = Updater(self.restart)
 
     @property
     def url(self) -> str:
@@ -100,6 +111,15 @@ class App:
             self.watchers.sync(self._watched_folders())
             self._repos_stale = True
             self._wake.set()
+
+    def restart(self):
+        """LabLog を起動し直す（更新したあと）。新しいプロセスは、このプロセスが終わるのを待ってから起動する。"""
+        base = install_base()
+        script = base / "LabLog.pyw" if base else Path(sys.argv[0]).resolve()
+        args = [sys.executable, str(script), "--no-browser", *self.extra_args, "--after", str(os.getpid())]
+        log.info("LabLog を起動し直します: %s", args)
+        subprocess.Popen(args, cwd=str(script.parent), creationflags=CREATE_NO_WINDOW)
+        threading.Timer(1.5, os._exit, (0,)).start()  # 画面への応答を返してから終わる
 
     def _record(self) -> dict:
         return self.settings.get("record")
@@ -325,9 +345,12 @@ def main(argv=None):
     parser.add_argument("--no-browser", action="store_true", help="起動時にダッシュボードを開かない")
     parser.add_argument("--data-dir", help="データの保存先（テスト用）")
     parser.add_argument("--port", type=int, help="ダッシュボードのポート（テスト用。設定より優先）")
+    parser.add_argument("--after", type=int, help="このプロセスが終わるのを待ってから起動する（起動し直すとき）")
     args = parser.parse_args(argv)
     if args.data_dir:
         os.environ["LABLOG_DATA_DIR"] = args.data_dir
+    if args.after:
+        wait_for_process(args.after, 60)
 
     _setup_logging()
     mutex_name = "Local\\LabLog-" + hashlib.md5(str(data_dir()).lower().encode()).hexdigest()[:10]
@@ -339,6 +362,9 @@ def main(argv=None):
     app = App()
     if args.port:
         app.port = args.port
+        app.extra_args += ["--port", str(args.port)]
+    if args.data_dir:
+        app.extra_args += ["--data-dir", args.data_dir]
     app.run(open_browser=not args.no_browser)
 
 

@@ -143,6 +143,8 @@ DEFAULT_SETTINGS = {
     "screen_text": {"enabled": True, "apps": SCREEN_TEXT_APPS, "interval_min": 5, "keep_days": 3},
     # iPhone・iPad 用ビューアーへの書き出し（要約だけ）。folder が空なら OneDrive のアプリフォルダを自動で探す。
     "cloud": {"enabled": True, "folder": "", "viewer_url": ""},
+    # 更新の確認（設定の画面のボタンを押したときだけ）。channel：stable（安定版）/ beta（テスト版も受け取る）
+    "update": {"channel": "stable"},
     "categories": DEFAULT_CATEGORIES,
 }
 
@@ -228,6 +230,13 @@ def _record(value):
             "recent_files": bool(value.get("recent_files", True))}
 
 
+def _update(value):
+    channel = value.get("channel", "stable")
+    if channel not in ("stable", "beta"):
+        raise ValueError("更新の種類が正しくありません")
+    return {"channel": channel}
+
+
 def _claude_code(value):
     return {"enabled": bool(value.get("enabled", True))}
 
@@ -267,6 +276,7 @@ VALIDATORS = {
     "git_notify": _git_notify,
     "ollama": _ollama,
     "cloud": _cloud,
+    "update": _update,
     "claude_code": _claude_code,
     "screen_text": _screen_text,
     "categories": _categories,

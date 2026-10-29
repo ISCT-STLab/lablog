@@ -17,8 +17,10 @@ sys.path.insert(0, str(ROOT))
 
 from lablog import __version__  # noqa: E402
 
-# 入れるもの（ROOT からの相対パス）。フォルダは中身ごと入れる
-INCLUDE = ["LabLog.pyw", "README.md", "LICENSE", "lablog", "install_autostart.ps1", "uninstall_autostart.ps1"]
+# 入れるもの（ROOT からの相対パス）。フォルダは中身ごと入れる。
+# install_autostart.ps1 などは開発用（リポジトリのフォルダから動かす）なので入れない
+INCLUDE = ["setup.cmd", "setup.ps1", "uninstall.cmd", "uninstall.ps1", "launcher.pyw", "LabLog.pyw", "README.md",
+           "LICENSE", "lablog"]
 SKIP_DIRS = {"__pycache__"}
 SKIP_SUFFIXES = {".pyc", ".pyo"}
 

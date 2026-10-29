@@ -13,16 +13,17 @@ import logging
 import os
 import sys
 import time
+import urllib.error
 from datetime import date, datetime
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from . import db
+from . import __version__, db, update
+from .aisetup import setup_info
 from .config import DEFAULT_CATEGORIES
 from .days import fmt_duration, fmt_hm, logical_date, parse_date, recent_clock_time
-from .aisetup import setup_info
 from .presence import delete_stay, save_stay
 from .report import generate_report, save_report
 from .summary import day_summary, month_summary
@@ -155,6 +156,41 @@ class Api:
             raise ApiError(str(exc))
         return self.app.ollama_setup.status()
 
+    def get_update(self, q):
+        # started：このプロセスが起動した時刻（画面が、起動し直したことに気づくため）
+        return {"current": __version__, "installed": self.app.updater.installed,
+                "channel": self.app.settings.get("update")["channel"], "job": self.app.updater.status(),
+                "started": self.app.status_snapshot()["started"]}
+
+    def _latest(self, channel: str) -> dict:
+        try:
+            return update.check(channel)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise ApiError("リリースが見つかりませんでした（配布元のリポジトリがまだ公開されていないかもしれません）")
+            raise ApiError(f"GitHub に問い合わせられませんでした（{exc.code}）")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise ApiError(f"GitHub に問い合わせられませんでした。インターネットにつながっているか確かめてください（{exc}）")
+
+    def post_update_check(self, body):
+        """「更新を確認」：GitHub の Releases に、新しい版があるかを問い合わせる。"""
+        channel = body.get("channel") or self.app.settings.get("update")["channel"]
+        if channel != self.app.settings.get("update")["channel"]:
+            self.post_settings({"update": {"channel": channel}})
+        return self._latest(channel) | {"installed": self.app.updater.installed}
+
+    def post_update_install(self, body):
+        """「更新する」：ダウンロード先は画面から受け取らず、ここでもう一度問い合わせて決める。"""
+        info = self._latest(self.app.settings.get("update")["channel"])
+        rel = info["latest"]
+        if not info["newer"] or not rel or rel["version"] != body.get("version"):
+            raise ApiError("更新できる版が変わりました。もう一度「更新を確認」を押してください")
+        try:
+            self.app.updater.start(rel)
+        except (RuntimeError, ValueError) as exc:
+            raise ApiError(str(exc))
+        return self.app.updater.status()
+
     def post_presence(self, body):
         action = body.get("action")
         if action not in ("enter", "leave"):
@@ -232,12 +268,14 @@ class Api:
 
 
 GET_ROUTES = {"/api/status": "get_status", "/api/day": "get_day", "/api/month": "get_month",
-              "/api/settings": "get_settings", "/api/ollama": "get_ollama", "/api/cloud": "get_cloud"}
+              "/api/settings": "get_settings", "/api/ollama": "get_ollama", "/api/cloud": "get_cloud",
+              "/api/update": "get_update"}
 POST_ROUTES = {"/api/settings": "post_settings", "/api/categories/reset": "post_categories_reset",
                "/api/wifi/register": "post_wifi_register",
                "/api/wifi/remove": "post_wifi_remove", "/api/folders/pick": "post_folders_pick",
                "/api/folders/add": "post_folders_add", "/api/folders/remove": "post_folders_remove",
-               "/api/pause": "post_pause", "/api/presence": "post_presence", "/api/ollama/setup": "post_ollama_setup", "/api/stay/save": "post_stay_save",
+               "/api/pause": "post_pause", "/api/presence": "post_presence", "/api/ollama/setup": "post_ollama_setup",
+               "/api/update/check": "post_update_check", "/api/update/install": "post_update_install", "/api/stay/save": "post_stay_save",
                "/api/stay/delete": "post_stay_delete", "/api/report/generate": "post_report_generate",
                "/api/report/save": "post_report_save", "/api/cloud/export": "post_cloud_export",
                "/api/screen_texts/clear": "post_screen_texts_clear"}

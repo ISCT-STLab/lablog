@@ -200,6 +200,21 @@ def capture_window(hwnd) -> tuple[int, int, bytes] | None:
             user32.SetThreadDpiAwarenessContext(previous)
 
 
+SYNCHRONIZE = 0x00100000
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+
+
+def wait_for_process(pid: int, timeout_sec: float):
+    """プロセスが終わるのを待つ（更新して起動し直すとき、前のプロセスが二重起動防止の印を手放すまで）。"""
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:  # もう終わっている
+        return
+    try:
+        kernel32.WaitForSingleObject(handle, int(timeout_sec * 1000))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def acquire_single_instance(name: str = "Local\\LabLog-Tracker"):
     """二重起動を防ぐ。すでに起動していれば None を返す。"""
     ctypes.set_last_error(0)
