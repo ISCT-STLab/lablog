@@ -20,6 +20,20 @@ def parse_date(text: str) -> date:
     return date.fromisoformat(text)
 
 
+def recent_clock_time(now: float, hhmm: str) -> float:
+    """「9:30」のような時刻を、now 以前でいちばん近いその時刻にする（いまより後なら前日の時刻）。"""
+    try:
+        h, m = (int(x) for x in hhmm.strip().split(":"))
+    except ValueError:
+        raise ValueError("時刻は 9:30 のように入力してください")
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError("時刻は 0:00〜23:59 で入力してください")
+    t = datetime.fromtimestamp(now).replace(hour=h, minute=m, second=0, microsecond=0)
+    if t.timestamp() > now:
+        t -= timedelta(days=1)
+    return t.timestamp()
+
+
 def fmt_hm(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%H:%M")
 

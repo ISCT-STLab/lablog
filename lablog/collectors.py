@@ -30,6 +30,14 @@ SKIP_SCHEMES = {"chrome", "edge", "about", "chrome-extension", "extension", "dev
                 "chrome-search", "edge-extension"}
 
 
+def first_since(conn, now: float) -> float:
+    """初めて取り込むときに、どの時刻から読むか。
+
+    今日（朝 5 時）からの分。ただし初回の設定を終える前の分は読まない（記録してよいか、まだ聞いていないため）。
+    """
+    return max(day_range(logical_date(now))[0], float(kv_get(conn, "record_since", 0) or 0))
+
+
 def _strip_dashboard_key(url: str, parsed) -> str:
     """LabLog がダッシュボードを開いた URL（?key=合言葉）から、合言葉を消す。"""
     if parsed.hostname not in LOCAL_HOSTS or "key=" not in parsed.query:
@@ -68,7 +76,7 @@ def _import_profile(conn, key, label, profile, src: Path, tmp_dir: Path, now: fl
     copy = tmp_dir / f"history_{key}_{profile.replace(' ', '_')}.sqlite"
     shutil.copyfile(src, copy)  # ブラウザが開いていても読めるようにコピーしてから読む
     last_id = int(kv_get(conn, state_key + ":last_id", -1))
-    since = day_range(logical_date(now))[0]  # 初回は今日（朝 5 時以降）の分だけ取り込む
+    since = first_since(conn, now)  # 初回は今日（朝 5 時以降）の分だけ取り込む
     src_conn = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
     try:
         max_id = src_conn.execute("SELECT MAX(id) FROM visits").fetchone()[0] or 0
@@ -134,7 +142,7 @@ def import_claude_code(conn, now: float, root: Path | None = None):
     root = root or CLAUDE_PROJECTS
     if not root.is_dir():
         return
-    since = day_range(logical_date(now))[0]
+    since = first_since(conn, now)
     pauses = paused_ranges(conn, 0, now, now)
     for path in root.glob("*/*.jsonl"):
         key = f"claude:{path}"
@@ -235,7 +243,7 @@ def import_recent_files(conn, now: float):
     recent = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Recent"
     if not recent.is_dir():
         return
-    last = float(kv_get(conn, "recent:last_mtime", day_range(logical_date(now))[0]))
+    last = float(kv_get(conn, "recent:last_mtime", first_since(conn, now)))
     pauses = paused_ranges(conn, last, now, now)
     newest = last
     batch = []
@@ -286,7 +294,7 @@ def discover_repos(folders: list[str], max_depth: int = 4) -> list[str]:
 
 def poll_repo(conn, repo: str, now: float):
     state = conn.execute("SELECT * FROM repo_state WHERE repo = ?", (repo,)).fetchone()
-    since_ts = float(kv_get(conn, f"git:{repo}:since", day_range(logical_date(now))[0]))
+    since_ts = float(kv_get(conn, f"git:{repo}:since", first_since(conn, now)))
     email = _git(repo, "config", "user.email", timeout=10).stdout.strip()
     args = ["log", "--all", f"--since={datetime.fromtimestamp(since_ts - 60).isoformat(timespec='seconds')}",
             "--format=%H%x1f%ct%x1f%ae%x1f%s"]

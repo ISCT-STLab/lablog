@@ -65,7 +65,7 @@ def _is_viewer_marker(path: Path) -> bool:
 def find_viewer_folder(root: Path | None = None) -> Path | None:
     """ビューアーが作ったアプリフォルダ（目印の viewer.json があるもの）を探す。
 
-    フォルダ名はふつう「アプリ\LabLog」だが、OneDrive が「Graph」などの名前で作ることもあるので、名前では決めない。
+    フォルダ名はふつう「アプリ/LabLog」だが、OneDrive が「Graph」などの名前で作ることもあるので、名前では決めない。
     """
     root = root or onedrive_root()
     if root is None:
@@ -202,7 +202,7 @@ class CloudSync:
     def run_once(self, conn, now: float):
         with self._lock:
             force, self._force = self._force, False
-        if not self._cfg()["enabled"]:
+        if not self._cfg()["enabled"] or not self.settings.get("setup_done", True):
             self.folder = None
             return
         folder = self._resolve_folder(now, force)

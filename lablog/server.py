@@ -21,9 +21,10 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import db
 from .config import DEFAULT_CATEGORIES
-from .days import fmt_duration, fmt_hm, logical_date, parse_date
+from .days import fmt_duration, fmt_hm, logical_date, parse_date, recent_clock_time
+from .aisetup import setup_info
 from .presence import delete_stay, save_stay
-from .report import generate_report, ollama_status, save_report
+from .report import generate_report, save_report
 from .summary import day_summary, month_summary
 from .wifi import WIFI_KINDS
 from .winapi import run_quiet
@@ -31,7 +32,7 @@ from .winapi import run_quiet
 log = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).parent / "web"
-STATIC = {"/": "index.html", "/app.js": "app.js", "/cloud.js": "cloud.js", "/config.js": "config.js",
+STATIC = {"/": "index.html", "/app.js": "app.js", "/setup.js": "setup.js", "/cloud.js": "cloud.js", "/config.js": "config.js",
           "/style.css": "style.css", "/favicon.svg": "favicon.svg", "/manifest.webmanifest": "manifest.webmanifest",
           "/icon-180.png": "icon-180.png", "/icon-192.png": "icon-192.png", "/icon-512.png": "icon-512.png",
           "/fonts/KleeOne-Regular.woff2": "fonts/KleeOne-Regular.woff2", "/fonts/OFL.txt": "fonts/OFL.txt"}
@@ -88,7 +89,7 @@ class Api:
                 "screen_text_count": count}
 
     def get_ollama(self, q):
-        return ollama_status(self.app.settings.get("ollama"))
+        return setup_info(self.app.settings.get("ollama")) | {"job": self.app.ollama_setup.status()}
 
     def get_cloud(self, q):
         return self.app.cloud.status()
@@ -146,13 +147,25 @@ class Api:
         folders = [f for f in self.app.settings.get("watch_folders") if f != body.get("path")]
         return self.post_settings({"watch_folders": folders})
 
+    def post_ollama_setup(self, body):
+        """Ollama のインストール（install）と、モデルのダウンロード（model）を始める。"""
+        try:
+            self.app.ollama_setup.start(bool(body.get("install")), body.get("model") or None)
+        except RuntimeError as exc:
+            raise ApiError(str(exc))
+        return self.app.ollama_setup.status()
+
     def post_presence(self, body):
         action = body.get("action")
         if action not in ("enter", "leave"):
             raise ApiError("操作が正しくありません")
-        if self.app.settings.get("presence").get("mode") == "home":
-            raise ApiError("自宅の PC では入退室を記録しません（設定の「入退室の判定」で変えられます）")
-        return self.app.manual_presence(action)
+        if self.app.settings.get("presence").get("mode") == "off":
+            raise ApiError("入退室を記録しない設定です（設定の「入退室の判定」で変えられます）")
+        try:  # time：押し忘れたときに指定した時刻（「9:30」。いまより後なら前日の時刻）
+            at = recent_clock_time(time.time(), str(body["time"])) if body.get("time") else None
+            return self.app.manual_presence(action, at)
+        except ValueError as exc:
+            raise ApiError(str(exc))
 
     def post_pause(self, body):
         self.app.set_paused(bool(body.get("paused")))
@@ -224,7 +237,7 @@ POST_ROUTES = {"/api/settings": "post_settings", "/api/categories/reset": "post_
                "/api/wifi/register": "post_wifi_register",
                "/api/wifi/remove": "post_wifi_remove", "/api/folders/pick": "post_folders_pick",
                "/api/folders/add": "post_folders_add", "/api/folders/remove": "post_folders_remove",
-               "/api/pause": "post_pause", "/api/presence": "post_presence", "/api/stay/save": "post_stay_save",
+               "/api/pause": "post_pause", "/api/presence": "post_presence", "/api/ollama/setup": "post_ollama_setup", "/api/stay/save": "post_stay_save",
                "/api/stay/delete": "post_stay_delete", "/api/report/generate": "post_report_generate",
                "/api/report/save": "post_report_save", "/api/cloud/export": "post_cloud_export",
                "/api/screen_texts/clear": "post_screen_texts_clear"}

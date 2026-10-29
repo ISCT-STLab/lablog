@@ -23,7 +23,7 @@ from lablog import GITHUB_REPO, VIEWER_URL  # noqa: E402
 WEB_DIR = ROOT / "lablog" / "web"
 DEFAULT_SITE = ROOT.parent / "lablog-viewer"
 DEFAULT_REMOTE = f"https://github.com/{GITHUB_REPO}.git"
-FILES = ["index.html", "style.css", "app.js", "cloud.js", "sw.js", "favicon.svg", "manifest.webmanifest",
+FILES = ["index.html", "style.css", "app.js", "setup.js", "cloud.js", "sw.js", "favicon.svg", "manifest.webmanifest",
          "icon-180.png", "icon-192.png", "icon-512.png", "fonts/KleeOne-Regular.woff2", "fonts/OFL.txt"]
 CLIENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 BRANCH = "gh-pages"

@@ -31,7 +31,8 @@ class CloudTest(unittest.TestCase):
         self.out = root / "onedrive"
         self.out.mkdir()
         self.settings = Settings(root / "settings.json")
-        self.settings.update({"cloud": {"enabled": True, "folder": str(self.out), "viewer_url": ""}})
+        self.settings.update({"setup_done": True,
+                              "cloud": {"enabled": True, "folder": str(self.out), "viewer_url": ""}})
         self.conn = make_conn()
         self.conn.execute("INSERT INTO stays (start_ts, end_ts, status, end_reason) VALUES (?, ?, 'closed', 'offcampus')",
                           (at(9), at(18)))
@@ -57,6 +58,11 @@ class CloudTest(unittest.TestCase):
         self.assertEqual(set(s["timeline"][0]), {"cat", "start", "end"})
         self.assertEqual(s["work_total"], H)
         self.assertEqual(s["stay_total"], 9 * H)
+
+    def test_nothing_is_exported_before_setup(self):
+        self.settings.update({"setup_done": False})
+        self.sync.run_once(self.conn, self.now)
+        self.assertEqual(list(self.out.iterdir()), [])
 
     def test_export_writes_files_and_skips_unchanged(self):
         self.sync.run_once(self.conn, self.now)

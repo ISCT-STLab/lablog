@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from . import db, wifi
 from .activity import IDLE_EXES, ActivityRecorder
+from .aisetup import OllamaSetup
 from .cloud import CloudSync
 from .collectors import (commit_reminders, discover_repos, import_browser_history, import_claude_code,
                          import_recent_files, poll_repo)
@@ -53,6 +54,7 @@ class App:
         self.sink = FileEventSink(db.connect(), lambda: self._paused, [str(data_dir())])
         self.watchers = WatcherManager(self.sink)
         self.cloud = CloudSync(self.settings, self.status_snapshot)
+        self.ollama_setup = OllamaSetup(self.settings)
 
     @property
     def url(self) -> str:
@@ -86,8 +88,15 @@ class App:
             self._paused = paused
             log.info("記録を%sしました", "一時停止" if paused else "再開")
 
+    def ready(self) -> bool:
+        """初回の設定を終えたか。終えるまでは、作業の記録も入退室の判定もしない。"""
+        return bool(self.settings.get("setup_done"))
+
     def settings_changed(self, keys: set[str]):
-        if keys & {"watch_folders", "record"}:
+        if "setup_done" in keys and self.ready() and not db.kv_get(self.conn, "record_since"):
+            db.kv_set(self.conn, "record_since", time.time())  # この時刻より前の履歴などは取り込まない
+            log.info("初回の設定を終えました。記録を始めます")
+        if keys & {"watch_folders", "record", "setup_done"}:
             self.watchers.sync(self._watched_folders())
             self._repos_stale = True
             self._wake.set()
@@ -97,7 +106,9 @@ class App:
 
     def _watched_folders(self) -> list[str]:
         """ファイル編集を記録する設定のときだけ、監視フォルダを見張る。"""
-        return self.settings.get("watch_folders") if self._record().get("files", True) else []
+        if not self.ready() or not self._record().get("files", True):
+            return []
+        return self.settings.get("watch_folders")
 
     def _presence_settings(self, presence: Presence):
         presence.leave_after = self.settings.get("leave_after_hours") * 3600
@@ -112,14 +123,17 @@ class App:
             if kind == "closed" and row:
                 self.queue_report(logical_date(row["start_ts"]), "退出確定")
 
-    def manual_presence(self, action: str) -> dict:
-        """ダッシュボードの入室・退室ボタン。"""
+    def manual_presence(self, action: str, at: float | None = None) -> dict:
+        """ダッシュボードの入室・退室ボタン。at：押し忘れたときに指定した時刻。"""
         conn = db.thread_conn()
         presence = Presence(conn)
         self._presence_settings(presence)
         now = time.time()
         with self.presence_lock:
-            events = presence.manual_enter(now) if action == "enter" else presence.manual_leave(now)
+            if action == "enter":
+                events = presence.manual_enter(now, at)
+            else:
+                events = presence.manual_leave(now, at)
         self._presence_events(conn, events)
         self.cloud.mark_dirty(logical_date(now))
         log.info("手動で%sしました", "入室" if action == "enter" else "退室")
@@ -127,7 +141,7 @@ class App:
         return self.status_snapshot()
 
     def queue_report(self, d, reason: str):
-        if self.settings.get("ollama").get("auto", True):
+        if self.ready() and self.settings.get("ollama").get("auto", True):
             self.report_jobs.put((d, reason))
 
     # ---- スレッド
@@ -148,7 +162,7 @@ class App:
                 idle_threshold = s.get("idle_threshold_min") * 60
                 self._presence_settings(presence)
                 pcfg = s.get("presence")
-                mode = pcfg.get("mode", "carry")
+                mode = pcfg.get("mode", "wifi")
                 recorder.interval = interval
                 now = time.time()
                 idle = idle_seconds()
@@ -159,20 +173,22 @@ class App:
                     last_local = max(last_local, now - idle)
                 local_idle = now - last_local
                 local_active = not remote and not locked and local_idle < pcfg.get("away_min", 15) * 60
+                ready = self.ready()
                 if now - last_check >= PRESENCE_CHECK_SEC:
                     last_check = now
-                    if mode == "carry":
+                    if mode == "wifi":
                         ssids, wifi_error = wifi.current_ssids()
                         net = wifi.classify(ssids, s.get("wifi"))
                     else:  # Wi-Fi は判定に使わない
                         ssids, wifi_error, net = [], None, wifi.OFFLINE
-                    with self.presence_lock:
-                        events = presence.tick(now, judge_net(mode, net, local_active, remote), local_idle)
-                    self._presence_events(conn, events)
+                    if ready:  # 初回の設定の前も Wi-Fi は調べる（設定の画面で研究室の Wi-Fi を登録するため）
+                        with self.presence_lock:
+                            events = presence.tick(now, judge_net(mode, net, local_active, remote), local_idle)
+                        self._presence_events(conn, events)
                 view = presence.status_view(now)
-                location = work_location(mode, net, view["state"], remote)
+                location = work_location(mode, net, view["state"], remote, pcfg.get("place", "home"))
                 excluded = {e.lower() for e in s.get("excluded_apps")}
-                recorder.tick(now, fg, idle, idle_threshold, location, excluded, self._paused,
+                recorder.tick(now, fg, idle, idle_threshold, location, excluded, self._paused or not ready,
                               self._record().get("apps", "title"))
                 today = logical_date(now)
                 if today != last_day:
@@ -191,6 +207,9 @@ class App:
         self._wake.wait(15)
         while True:
             self._wake.clear()
+            if not self.ready():
+                self._wake.wait(COLLECT_SEC)
+                continue
             now = time.time()
             record = self._record()
             jobs = [("ブラウザ履歴", lambda: import_browser_history(conn, s.get("browsers"), now))]
@@ -236,7 +255,7 @@ class App:
                     recorder.cleanup(now, cfg.get("keep_days", 3))
                     last_cleanup = now
                 excluded = {e.lower() for e in self.settings.get("excluded_apps")}
-                recorder.tick(now, cfg, excluded, self._paused, idle_seconds())
+                recorder.tick(now, cfg, excluded, self._paused or not self.ready(), idle_seconds())
             except Exception:
                 log.exception("画面の文字の読み取りでエラーが起きました")
             time.sleep(SCREEN_TEXT_CHECK_SEC)

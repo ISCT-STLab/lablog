@@ -117,13 +117,16 @@ SCREEN_TEXT_APPS = ["claude.exe", "chatgpt.exe", "todo.exe", "ms-teams.exe", "te
 OLD_SCREEN_TEXT_APPS = [["claude.exe", "chatgpt.exe"]]
 
 DEFAULT_SETTINGS = {
+    # 初回の設定（ダッシュボードの #/setup）を終えたか。終えるまでは何も記録しない（main.py の App.ready）
+    "setup_done": False,
     "port": 8765,
     "sample_interval_sec": 5,
     "idle_threshold_min": 5,
     "leave_after_hours": 4,
-    # 入退室の判定。mode：carry（持ち帰る。Wi-Fi で判定）/ stay（研究室に置いたまま。手元の操作で判定）/
-    # home（自宅の PC。判定しない）。away_min：stay のとき、手元の操作がこれだけないと仮退出にする（分）
-    "presence": {"mode": "carry", "away_min": 15},
+    # 入退室の判定方法（利用者が選ぶ）。mode：wifi（Wi-Fi で判定）/ activity（この PC の操作で判定）/ manual（手動）/
+    # off（記録しない）。away_min：activity のとき、手元の操作がこれだけないと仮退出にする（分）。
+    # place：off のとき、PC作業時間の場所として数える所（home：自宅 / other：その他）
+    "presence": {"mode": "wifi", "away_min": 15, "remote": "none", "place": "home"},
     # ignore：判定に使わない Wi-Fi（iPhone のテザリングなど、大学でも大学の外でも使うもの）
     "wifi": {"univ": [], "home": [], "ignore": []},
     "watch_folders": [],
@@ -197,14 +200,24 @@ def _cloud(value):
 
 
 APP_RECORD_MODES = ("title", "app", "off")
-PRESENCE_MODES = ("carry", "stay", "home")
+PRESENCE_MODES = ("wifi", "activity", "manual", "off")
+OLD_PRESENCE_MODES = {"carry": "wifi", "stay": "activity", "home": "off"}  # PC の使い方で選んでいた前の版の名前
+PRESENCE_PLACES = ("home", "other")
+REMOTE_TOOLS = ("none", "rdp", "other")  # 自宅などからこの PC に入る方法（初期設定で聞く。今は案内にだけ使う）
 
 
 def _presence(value):
-    mode = value.get("mode", "carry")
+    mode = value.get("mode", "wifi")
+    mode = OLD_PRESENCE_MODES.get(mode, mode)
     if mode not in PRESENCE_MODES:
-        raise ValueError("PC の使い方が正しくありません")
-    return {"mode": mode, "away_min": _number(1, 120)(value.get("away_min", 15))}
+        raise ValueError("入退室の判定方法が正しくありません")
+    place = value.get("place", "home")
+    if place not in PRESENCE_PLACES:
+        raise ValueError("作業した場所が正しくありません")
+    remote = value.get("remote", "none")
+    if remote not in REMOTE_TOOLS:
+        raise ValueError("リモートの接続方法が正しくありません")
+    return {"mode": mode, "away_min": _number(1, 120)(value.get("away_min", 15)), "remote": remote, "place": place}
 
 
 def _record(value):
@@ -240,6 +253,7 @@ def _categories(value):
 
 
 VALIDATORS = {
+    "setup_done": bool,
     "port": _number(1024, 65535, int),
     "sample_interval_sec": _number(2, 60, int),
     "idle_threshold_min": _number(1, 60),
@@ -269,6 +283,8 @@ class Settings:
         if self.path.exists():
             try:
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                # 初回の設定ができる前から使っている人は、設定を済ませたものとみなす
+                loaded.setdefault("setup_done", True)
                 for key, value in loaded.items():
                     if key in self._data:
                         # 新しい版で増えた項目（wifi の ignore など）は初期値で補う
@@ -276,6 +292,9 @@ class Settings:
                         self._data[key] = default | value if isinstance(default, dict) and isinstance(value, dict) else value
             except (OSError, ValueError):
                 pass
+        presence = self._data.get("presence")
+        if isinstance(presence, dict) and presence.get("mode") in OLD_PRESENCE_MODES:
+            presence["mode"] = OLD_PRESENCE_MODES[presence["mode"]]
         screen = self._data.get("screen_text")
         if isinstance(screen, dict) and screen.get("apps") in OLD_SCREEN_TEXT_APPS:
             screen["apps"] = list(SCREEN_TEXT_APPS)

@@ -1,11 +1,13 @@
 """大学での滞在（入室・仮退出・退出確定）の判定。
 
-PC の使い方（設定の presence.mode）で、判定に使うものが変わる（judge_net）。
-- carry（持ち帰る）：Wi-Fi と操作の有無で、下のルールのとおりに判定する
-- stay（研究室に置いたまま）：手元で操作しているかどうか。操作中を「大学の Wi-Fi」、操作していない・
+利用者が選んだ判定方法（設定の presence.mode）で、判定に使うものが変わる（judge_net）。
+- wifi（Wi-Fi で判定）：Wi-Fi と操作の有無で、下のルールのとおりに判定する
+- activity（この PC の操作で判定）：手元で操作しているかどうか。操作中を「大学の Wi-Fi」、操作していない・
   ロック中・リモートデスクトップ中を「Wi-Fi が切れた」とみなして、同じルールで判定する
-- home（自宅の PC）：判定しない
-どの使い方でも、リモートデスクトップで操作している間は研究室にいないとみなす。
+- manual（手動）：自動では入室にしない（ボタンだけ）。押し忘れたときのために、「判定に使わない Wi-Fi」と同じ扱いにして、
+  操作がない・PC が止まっていた時間が leave_after を超えたら、最後に操作した時刻で退出確定する
+- off（記録しない）：判定しない
+どの方法でも、リモートデスクトップで操作している間は研究室にいないとみなす。
 
 ルール
 - 大学の Wi-Fi につながる → 入室（仮退出中なら取り消して滞在を続ける）
@@ -22,6 +24,7 @@ PC の使い方（設定の presence.mode）で、判定に使うものが変わ
   自動では入室にしない（押したあとも研究室の Wi-Fi のまま・操作したままのことが多いため）
 """
 
+from .days import fmt_hm
 from .db import kv_get, kv_set
 from .wifi import IGNORED, LOCATION_LABELS, OFFLINE, OTHER, UNIV
 
@@ -31,24 +34,26 @@ SUPPRESS_KEY = "presence_suppress"   # "1"：手動で退室したので、自�
 
 def judge_net(mode: str, wifi_net: str, local_active: bool, remote: bool) -> str:
     """判定に使う「つながり」（Presence.tick に渡すもの）。"""
-    if mode == "home":
+    if mode == "off":
         return OTHER
     if remote:
         return OFFLINE
-    if mode == "stay":
+    if mode == "activity":
         return UNIV if local_active else OFFLINE
+    if mode == "manual":
+        return IGNORED
     return wifi_net
 
 
-def work_location(mode: str, wifi_net: str, state: str, remote: bool) -> str:
-    """作業していた場所（segments.location に記録する名前）。"""
+def work_location(mode: str, wifi_net: str, state: str, remote: bool, place: str = "home") -> str:
+    """作業していた場所（segments.location に記録する名前）。place：記録しないときに数える場所（設定で選ぶ）。"""
     if remote:
         return "自宅"  # リモートデスクトップ：外からこの PC に入っている
-    if mode == "stay":
+    if mode == "activity":
         return "大学"
-    if mode == "home":
-        return "自宅"
-    if wifi_net == IGNORED:  # テザリングなど：滞在中なら大学での作業とみなす
+    if mode == "off":
+        return "自宅" if place == "home" else "その他"
+    if mode == "manual" or wifi_net == IGNORED:  # 手動・テザリングなど：滞在中なら大学での作業とみなす
         return "大学" if state == "in" else "その他"
     return LOCATION_LABELS[wifi_net]
 
@@ -85,36 +90,65 @@ class Presence:
             events.append(("opened", self._open(now)))
         return events
 
-    def manual_enter(self, now: float) -> list[tuple[str, int]]:
-        """入室ボタン。仮退出中なら滞在を続け、そうでなければ新しく入室する。"""
-        events: list[tuple[str, int]] = []
+    def manual_enter(self, now: float, at: float | None = None) -> list[tuple[str, int]]:
+        """入室ボタン。仮退出中なら滞在を続け、そうでなければ新しく入室する。
+
+        at：押し忘れたときに指定する入室の時刻。在室中に指定したときは、入室の時刻をその時刻に直す。
+        """
+        if at is not None and at > now:
+            raise ValueError("これからの時刻は指定できません")
         stay = self.open_stay()
-        if stay is not None and stay["status"] == "tentative" and now - stay["tentative_since"] >= self.leave_after:
+        expired = (stay is not None and stay["status"] == "tentative"
+                   and now - stay["tentative_since"] >= self.leave_after)
+        if at is not None:  # 前の滞在と重ならないか（直すと、前の滞在の記録が壊れるため）
+            prev_end = stay["tentative_since"] if expired else self._last_end(stay["id"] if stay else None)
+            if prev_end is not None and at < prev_end:
+                raise ValueError(f"{fmt_hm(at)} は、前の滞在の退室（{fmt_hm(prev_end)}）より前です。"
+                                 "入退室の記録の「編集」で直してください")
+        events: list[tuple[str, int]] = []
+        if expired:
             stay = self._close(stay, stay["tentative_since"], "timeout", events)
         if stay is None:
-            stay_id = self._open(now)
+            stay_id = self._open(now if at is None else at, now)
             events.append(("opened", stay_id))
         else:
-            self._set(stay, status="in", tentative_since=None, last_seen_ts=now)
+            fields = {"status": "in", "tentative_since": None, "last_seen_ts": now}
+            if at is not None:
+                fields |= {"start_ts": at, "manual": 1}
+            self._set(stay, **fields)
             stay_id = stay["id"]
         kv_set(self.conn, MANUAL_KEY, stay_id)
         kv_set(self.conn, SUPPRESS_KEY, "0")
         return events
 
-    def manual_leave(self, now: float) -> list[tuple[str, int]]:
-        """退室ボタン。いま（仮退出中なら仮退出した時刻）で退出を確定する。"""
-        events: list[tuple[str, int]] = []
+    def manual_leave(self, now: float, at: float | None = None) -> list[tuple[str, int]]:
+        """退室ボタン。いま（仮退出中なら仮退出した時刻）で退出を確定する。at：押し忘れたときに指定する退室の時刻。"""
         stay = self.open_stay()
+        if at is not None:
+            if stay is None:
+                raise ValueError("いまは在室中ではありません。前の退室の時刻は、入退室の記録の「編集」で直してください")
+            if at > now:
+                raise ValueError("これからの時刻は指定できません")
+            if at <= stay["start_ts"]:
+                raise ValueError(f"退室は、入室（{fmt_hm(stay['start_ts'])}）より後の時刻にしてください")
+        events: list[tuple[str, int]] = []
         if stay is not None:
-            end = stay["tentative_since"] if stay["status"] == "tentative" else now
+            end = at if at is not None else stay["tentative_since"] if stay["status"] == "tentative" else now
             self._close(stay, end, "manual_out", events)
         kv_set(self.conn, MANUAL_KEY, "")
         kv_set(self.conn, SUPPRESS_KEY, "1")
         return events
 
-    def _open(self, now: float) -> int:
-        cur = self.conn.execute("INSERT INTO stays (start_ts, last_seen_ts, status) VALUES (?, ?, 'in')", (now, now))
+    def _open(self, start: float, seen: float | None = None) -> int:
+        cur = self.conn.execute("INSERT INTO stays (start_ts, last_seen_ts, status) VALUES (?, ?, 'in')",
+                                (start, start if seen is None else seen))
         return cur.lastrowid
+
+    def _last_end(self, exclude: int | None) -> float | None:
+        """閉じた滞在のうち、いちばん遅い退室の時刻。"""
+        row = self.conn.execute("SELECT MAX(end_ts) FROM stays WHERE status = 'closed' AND id IS NOT ?",
+                                (exclude,)).fetchone()
+        return row[0]
 
     def _advance(self, stay: dict, now: float, net: str, idle: float, events) -> dict | None:
         if stay["status"] == "in" and now - stay["last_seen_ts"] > self.gap:

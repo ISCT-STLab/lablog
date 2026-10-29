@@ -23,6 +23,13 @@ class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", wt.UINT), ("dwTime", wt.DWORD)]
 
 
+class MEMORYSTATUSEX(ctypes.Structure):
+    _fields_ = [("dwLength", wt.DWORD), ("dwMemoryLoad", wt.DWORD), ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG), ("biPlanes", wt.WORD),
                 ("biBitCount", wt.WORD), ("biCompression", wt.DWORD), ("biSizeImage", wt.DWORD),
@@ -76,6 +83,14 @@ def idle_seconds() -> float:
         return 0.0
     now = kernel32.GetTickCount64() & 0xFFFFFFFF
     return ((now - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
+def total_memory_gb() -> float:
+    """この PC のメモリの大きさ（GB）。分からなければ 0。"""
+    status = MEMORYSTATUSEX(ctypes.sizeof(MEMORYSTATUSEX))
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return 0.0
+    return status.ullTotalPhys / 1024 ** 3
 
 
 SM_REMOTESESSION = 0x1000
