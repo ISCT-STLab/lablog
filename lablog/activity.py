@@ -2,6 +2,7 @@
 
 IDLE_EXES = {"lockapp.exe"}  # ロック画面
 EXCLUDED_LABEL = "(除外)"
+UNRECORDED_LABEL = "(アプリを記録しない設定)"  # 設定の record.apps が off のとき（作業時間だけ残す）
 MAX_TITLE = 300
 
 
@@ -12,7 +13,7 @@ class ActivityRecorder:
         self.cur: dict | None = None  # 記録中の区間 {id, key, start, end}
 
     def tick(self, now: float, fg: tuple[str, str] | None, idle: float, idle_threshold: float,
-             location: str, excluded: set[str], paused: bool):
+             location: str, excluded: set[str], paused: bool, apps_mode: str = "title"):
         if paused:
             self.cur = None
             return
@@ -21,8 +22,12 @@ class ActivityRecorder:
         if is_idle:
             key = ("", "", 1, location)
         else:
-            if exe.lower() in excluded:
+            if apps_mode == "off":
+                exe, title = UNRECORDED_LABEL, ""
+            elif exe.lower() in excluded:
                 exe, title = EXCLUDED_LABEL, ""
+            elif apps_mode == "app":
+                title = ""
             key = (exe, title[:MAX_TITLE], 0, location)
 
         cur = self.cur

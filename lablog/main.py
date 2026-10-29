@@ -17,7 +17,7 @@ from .activity import ActivityRecorder
 from .cloud import CloudSync
 from .collectors import (commit_reminders, discover_repos, import_browser_history, import_claude_code,
                          import_recent_files, poll_repo)
-from .config import Settings, data_dir
+from .config import Settings, dashboard_key, data_dir
 from .days import day_range, fmt_duration, logical_date
 from .filewatch import FileEventSink, WatcherManager
 from .presence import Presence
@@ -57,6 +57,11 @@ class App:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"
 
+    @property
+    def open_url(self) -> str:
+        """ブラウザで開くときの URL（合言葉付き。ブラウザが Cookie に覚えたら、合言葉を外した URL に移る）。"""
+        return f"{self.url}?key={dashboard_key()}"
+
     # ---- 状態
 
     def status_snapshot(self) -> dict:
@@ -81,10 +86,17 @@ class App:
             log.info("記録を%sしました", "一時停止" if paused else "再開")
 
     def settings_changed(self, keys: set[str]):
-        if "watch_folders" in keys:
-            self.watchers.sync(self.settings.get("watch_folders"))
+        if keys & {"watch_folders", "record"}:
+            self.watchers.sync(self._watched_folders())
             self._repos_stale = True
             self._wake.set()
+
+    def _record(self) -> dict:
+        return self.settings.get("record")
+
+    def _watched_folders(self) -> list[str]:
+        """ファイル編集を記録する設定のときだけ、監視フォルダを見張る。"""
+        return self.settings.get("watch_folders") if self._record().get("files", True) else []
 
     def queue_report(self, d, reason: str):
         if self.settings.get("ollama").get("auto", True):
@@ -128,7 +140,8 @@ class App:
                 else:
                     location = wifi.LOCATION_LABELS[net]
                 excluded = {e.lower() for e in s.get("excluded_apps")}
-                recorder.tick(now, fg, idle, idle_threshold, location, excluded, self._paused)
+                recorder.tick(now, fg, idle, idle_threshold, location, excluded, self._paused,
+                              self._record().get("apps", "title"))
                 today = logical_date(now)
                 if today != last_day:
                     self.queue_report(last_day, "日付の切り替わり")
@@ -147,8 +160,10 @@ class App:
         while True:
             self._wake.clear()
             now = time.time()
-            jobs = [("ブラウザ履歴", lambda: import_browser_history(conn, s.get("browsers"), now)),
-                    ("最近使ったファイル", lambda: import_recent_files(conn, now))]
+            record = self._record()
+            jobs = [("ブラウザ履歴", lambda: import_browser_history(conn, s.get("browsers"), now))]
+            if record.get("recent_files", True):
+                jobs.append(("最近使ったファイル", lambda: import_recent_files(conn, now)))
             if s.get("claude_code").get("enabled", True):
                 jobs.append(("Claude Code の会話", lambda: import_claude_code(conn, now)))
             for name, job in jobs:
@@ -158,8 +173,11 @@ class App:
                     log.exception("%sの取り込みでエラーが起きました", name)
             try:
                 folders = s.get("watch_folders")
-                self.watchers.sync(folders)
-                if self._repos_stale or now - last_discover > REPO_DISCOVER_SEC:
+                self.watchers.sync(self._watched_folders())
+                if not record.get("git", True):
+                    self.repos = []
+                    self._repos_stale = True
+                elif self._repos_stale or now - last_discover > REPO_DISCOVER_SEC:
                     self.repos = discover_repos(folders)
                     self._repos_stale = False
                     last_discover = now
@@ -219,13 +237,13 @@ class App:
 
     def run(self, open_browser: bool):
         try:
-            server = make_server(self, self.port)
+            server = make_server(self, self.port, dashboard_key())
         except OSError:
             log.exception("ポート %s を使えません", self.port)
             show_toast("LabLog を起動できませんでした",
                        f"ポート {self.port} が他のアプリに使われています。設定ファイルの port を変えてください。")
             return
-        self.watchers.sync(self.settings.get("watch_folders"))
+        self.watchers.sync(self._watched_folders())
         for target, name in ((self.activity_loop, "activity"), (self.collect_loop, "collect"),
                              (self.report_loop, "report"), (self.cloud.loop, "cloud"),
                              (self.screen_text_loop, "screen-text")):
@@ -233,7 +251,7 @@ class App:
         self.queue_report(logical_date(time.time()) - timedelta(days=1), "起動時（前日分が無ければ）")
         log.info("LabLog を起動しました: %s（データ: %s）", self.url, data_dir())
         if open_browser:
-            threading.Timer(1.0, webbrowser.open, (self.url,)).start()
+            threading.Timer(1.0, webbrowser.open, (self.open_url,)).start()
         server.serve_forever()
 
 
@@ -265,7 +283,7 @@ def main(argv=None):
     if acquire_single_instance(mutex_name) is None:
         # すでに起動している場合は、ダッシュボードを開くだけにする
         if not args.no_browser:
-            webbrowser.open(f"http://127.0.0.1:{args.port or Settings().get('port')}/")
+            webbrowser.open(f"http://127.0.0.1:{args.port or Settings().get('port')}/?key={dashboard_key()}")
         return
     app = App()
     if args.port:

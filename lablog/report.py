@@ -227,7 +227,7 @@ def generate_report(conn, settings, d: date, force: bool = False) -> dict:
         cfg = settings.get("ollama")
         source = "rule"
         text = None
-        if ollama_status(cfg).get("model_ready"):
+        if cfg.get("enabled", True) and ollama_status(cfg).get("model_ready"):
             try:
                 started = time.time()
                 text = ollama_generate(cfg, build_digest(s))

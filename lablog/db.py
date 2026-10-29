@@ -1,10 +1,18 @@
-"""SQLite の接続とテーブル定義。"""
+"""SQLite の接続とテーブル定義。
 
+表の形を変えるときは SCHEMA を書き換えず、MIGRATIONS の最後に足す（SCHEMA は版 1 のまま）。
+移行は列や表を足すだけにする（更新に失敗して前の版に戻したときも、古い版で読めるように）。
+"""
+
+import logging
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 from .config import data_dir
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (
@@ -149,8 +157,60 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
+# (版, SQL)。版 2 から順に足していく
+MIGRATIONS: list[tuple[int, str]] = []
+SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1
+KEEP_BACKUPS = 3
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
 def init(conn: sqlite3.Connection):
     conn.executescript(SCHEMA)
+    version = schema_version(conn)
+    if version == 0:  # 新しく作った DB と、版を持つ前の DB は、どちらも版 1 の形
+        conn.execute("PRAGMA user_version = 1")
+        version = 1
+    if version > SCHEMA_VERSION:
+        log.warning("この記録は新しい版の LabLog で作られています（DB の版 %s、この LabLog は %s まで）",
+                    version, SCHEMA_VERSION)
+        return
+    pending = [(v, sql) for v, sql in MIGRATIONS if v > version]
+    if not pending:
+        return
+    backup(conn, f"v{version}")
+    for v, sql in pending:
+        conn.execute("BEGIN")
+        try:
+            for statement in filter(str.strip, sql.split(";")):
+                conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {int(v)}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        log.info("DB を版 %s に移行しました", v)
+
+
+def backup(conn: sqlite3.Connection, label: str) -> Path | None:
+    """DB の写しを backups フォルダに作る（新しいものから KEEP_BACKUPS 個だけ残す）。"""
+    file = conn.execute("PRAGMA database_list").fetchone()[2]
+    if not file:  # メモリー上の DB（テスト）
+        return None
+    folder = Path(file).parent / "backups"
+    folder.mkdir(exist_ok=True)
+    target = folder / f"lablog-{time.strftime('%Y%m%d-%H%M%S')}-{label}.db"
+    dest = sqlite3.connect(str(target))
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    for old in sorted(folder.glob("lablog-*.db"))[:-KEEP_BACKUPS]:
+        old.unlink(missing_ok=True)
+    log.info("DB の写しを作りました: %s", target)
+    return target
 
 
 _local = threading.local()

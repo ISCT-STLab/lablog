@@ -1,7 +1,12 @@
-"""ダッシュボード用の Web サーバー（127.0.0.1 だけで待ち受ける）。"""
+"""ダッシュボード用の Web サーバー（127.0.0.1 だけで待ち受ける）。
+
+画面のファイル（index.html など。公開しているブラウザ版と同じもの）は誰でも読めるが、
+記録を読み書きする /api は、合言葉の Cookie を持つブラウザだけが使える（config.dashboard_key）。
+"""
 
 import copy
 import csv
+import hmac
 import io
 import json
 import logging
@@ -9,9 +14,10 @@ import os
 import sys
 import time
 from datetime import date, datetime
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import db
 from .config import DEFAULT_CATEGORIES
@@ -216,7 +222,15 @@ POST_ROUTES = {"/api/settings": "post_settings", "/api/categories/reset": "post_
                "/api/screen_texts/clear": "post_screen_texts_clear"}
 
 
-def make_handler(api: Api):
+KEY_REQUIRED = {"error": "このページは、LabLog を起動した Windows のアカウントからだけ開けます。"
+                        "スタートメニューの「LabLog」から開き直してください。", "code": "key_required"}
+COOKIE_MAX_AGE = 10 * 365 * 24 * 3600
+
+
+def make_handler(api: Api, key: str, port: int):
+    # Cookie はポートで分かれないので、名前にポートを入れる（テスト用に別のポートで動かしたときに混ざらない）
+    cookie_name = f"lablog_key_{port}"
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "LabLog"
         protocol_version = "HTTP/1.1"
@@ -228,6 +242,24 @@ def make_handler(api: Api):
             # DNS リバインディング対策：PC 内の名前で来たリクエストだけ受け付ける
             host = self.headers.get("Host", "").rsplit(":", 1)[0].strip("[]")
             return host in ("127.0.0.1", "localhost", "::1")
+
+        def _key_ok(self) -> bool:
+            try:
+                morsel = SimpleCookie(self.headers.get("Cookie", "")).get(cookie_name)
+            except CookieError:
+                return False
+            return morsel is not None and hmac.compare_digest(morsel.value.encode(), key.encode())
+
+        def _accept_key(self, url, q) -> bool:
+            """?key=合言葉 で開かれたら Cookie に覚えさせ、合言葉を消した URL へ移る。"""
+            given = q.pop("key", None)
+            if given is None or not hmac.compare_digest(given.encode(), key.encode()):
+                return False
+            rest = urlencode(q)
+            self._send(303, b"", "text/plain", {
+                "Location": url.path + (f"?{rest}" if rest else ""),
+                "Set-Cookie": f"{cookie_name}={key}; Path=/; HttpOnly; SameSite=Strict; Max-Age={COOKIE_MAX_AGE}"})
+            return True
 
         def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
             self.send_response(status)
@@ -259,9 +291,13 @@ def make_handler(api: Api):
                 return self._send(403, b"forbidden", "text/plain")
             url = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if self._accept_key(url, q):
+                return
             if url.path in STATIC:
                 file = WEB_DIR / STATIC[url.path]
                 return self._send(200, file.read_bytes(), CONTENT_TYPES[file.suffix])
+            if not self._key_ok():
+                return self._json(KEY_REQUIRED, 401)
             if url.path == "/api/export/stays.csv":
                 name = f"lablog_{q.get('month', 'export')}.csv"
                 try:
@@ -280,6 +316,8 @@ def make_handler(api: Api):
             # 他のサイトから勝手に操作されないよう、独自ヘッダー付きのリクエストだけ受け付ける
             if not self._host_ok() or self.headers.get("X-LabLog") != "1":
                 return self._send(403, b"forbidden", "text/plain")
+            if not self._key_ok():
+                return self._json(KEY_REQUIRED, 401)
             try:
                 body = json.loads(raw or b"{}")
             except ValueError:
@@ -292,7 +330,7 @@ def make_handler(api: Api):
     return Handler
 
 
-def make_server(app, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Api(app)))
+def make_server(app, port: int, key: str) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Api(app), key, port))
     server.daemon_threads = True
     return server

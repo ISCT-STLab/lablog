@@ -16,16 +16,20 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from lablog import GITHUB_REPO, VIEWER_URL  # noqa: E402
+
 WEB_DIR = ROOT / "lablog" / "web"
 DEFAULT_SITE = ROOT.parent / "lablog-viewer"
-DEFAULT_REMOTE = "https://github.com/kkosugitm/lablog.git"
+DEFAULT_REMOTE = f"https://github.com/{GITHUB_REPO}.git"
 FILES = ["index.html", "style.css", "app.js", "cloud.js", "sw.js", "favicon.svg", "manifest.webmanifest",
          "icon-180.png", "icon-192.png", "icon-512.png", "fonts/KleeOne-Regular.woff2", "fonts/OFL.txt"]
 CLIENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 BRANCH = "gh-pages"
-README = """# LabLog ビューアー
+README = f"""# LabLog ビューアー
 
-[LabLog](https://kkosugitm.github.io/lablog/) の iPhone・iPad 用の画面です。
+[LabLog]({VIEWER_URL}) の iPhone・iPad 用の画面です。
 PC の LabLog が OneDrive のアプリ専用フォルダに書き出した要約を、本人の Microsoft アカウントでサインインして表示します。
 このリポジトリには画面のプログラムだけがあり、記録のデータは含みません。
 """

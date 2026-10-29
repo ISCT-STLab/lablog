@@ -9,9 +9,9 @@ import struct
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
-from .config import data_dir
+from .config import LOCAL_HOSTS, data_dir
 from .db import in_ranges, kv_get, kv_set, paused_ranges
 from .days import day_range, logical_date
 from .filewatch import IGNORE_DIRS
@@ -28,6 +28,14 @@ BROWSERS = {
 CHROME_EPOCH_OFFSET = 11644473600  # 1601-01-01 から 1970-01-01 までの秒数
 SKIP_SCHEMES = {"chrome", "edge", "about", "chrome-extension", "extension", "devtools", "data", "blob",
                 "chrome-search", "edge-extension"}
+
+
+def _strip_dashboard_key(url: str, parsed) -> str:
+    """LabLog がダッシュボードを開いた URL（?key=合言葉）から、合言葉を消す。"""
+    if parsed.hostname not in LOCAL_HOSTS or "key=" not in parsed.query:
+        return url
+    query = urlencode([(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k != "key"])
+    return parsed._replace(query=query).geturl()
 
 
 def _browser_profiles(base: Path):
@@ -96,7 +104,7 @@ def _import_profile(conn, key, label, profile, src: Path, tmp_dir: Path, now: fl
         if parsed.scheme in SKIP_SCHEMES or in_ranges(ts, pauses):
             continue
         domain = (parsed.hostname or ("file" if parsed.scheme == "file" else "")).removeprefix("www.")
-        batch.append((ts, label, profile, visit_id, url, title or "", domain))
+        batch.append((ts, label, profile, visit_id, _strip_dashboard_key(url, parsed), title or "", domain))
     if batch:
         conn.executemany("INSERT OR IGNORE INTO web_visits (ts, browser, profile, visit_id, url, title, domain) "
                          "VALUES (?, ?, ?, ?, ?, ?, ?)", batch)

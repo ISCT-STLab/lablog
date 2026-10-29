@@ -7,6 +7,7 @@
 import copy
 import json
 import os
+import secrets
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +24,24 @@ def data_dir() -> Path:
     base = Path(override) if override else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def dashboard_key() -> str:
+    """ダッシュボードの合言葉（初回に作り、データの保存場所に置く）。
+
+    保存場所は自分の Windows アカウントのフォルダなので、同じ PC の別のアカウントからは読めない。
+    LabLog が開くときだけ URL に付け、ブラウザには Cookie として覚えさせる（server.py）。
+    """
+    path = data_dir() / "dashboard.key"
+    try:
+        key = path.read_text(encoding="ascii").strip()
+        if len(key) >= 32:
+            return key
+    except (OSError, ValueError):
+        pass
+    key = secrets.token_urlsafe(32)
+    path.write_text(key, encoding="ascii")
+    return key
 
 
 DEFAULT_CATEGORIES = [
@@ -105,10 +124,14 @@ DEFAULT_SETTINGS = {
     # ignore：判定に使わない Wi-Fi（iPhone のテザリングなど、大学でも大学の外でも使うもの）
     "wifi": {"univ": [], "home": [], "ignore": []},
     "watch_folders": [],
+    # 記録する材料。apps：title（アプリ名とウィンドウ名）/ app（アプリ名だけ）/ off（作業時間だけ）
+    # files：監視フォルダのファイル編集、git：コミットと未コミットの変更、recent_files：Windows の「最近使ったファイル」
+    "record": {"apps": "title", "files": True, "git": True, "recent_files": True},
     "excluded_apps": [],
     "browsers": {"chrome": True, "edge": True},
     "git_notify": {"enabled": True, "hours": 2},
-    "ollama": {"url": "http://127.0.0.1:11434", "model": "qwen3:8b", "auto": True},
+    # enabled：日報に AI を使う（使わないときは集計から箇条書きで作る）。auto：日報を自動で作る
+    "ollama": {"enabled": True, "url": "http://127.0.0.1:11434", "model": "qwen3:8b", "auto": True},
     # ウィンドウ名から作業内容が分からないアプリの補い方
     "claude_code": {"enabled": True},  # Claude Code の会話の題名・作業フォルダ（中身は読まない）
     "screen_text": {"enabled": True, "apps": SCREEN_TEXT_APPS, "interval_min": 5, "keep_days": 3},
@@ -155,7 +178,8 @@ def _ollama(value):
     url = str(value.get("url", "")).strip()
     if not is_local_url(url):
         raise ValueError("Ollama の URL は PC 内（127.0.0.1 / localhost）だけ指定できます")
-    return {"url": url, "model": str(value.get("model", "")).strip(), "auto": bool(value.get("auto", True))}
+    return {"enabled": bool(value.get("enabled", True)), "url": url, "model": str(value.get("model", "")).strip(),
+            "auto": bool(value.get("auto", True))}
 
 
 def _cloud(value):
@@ -167,6 +191,17 @@ def _cloud(value):
         raise ValueError("ビューアーの URL は https:// で始まるものを指定してください")
     return {"enabled": bool(value.get("enabled", True)), "folder": folder and os.path.normpath(folder),
             "viewer_url": viewer_url}
+
+
+APP_RECORD_MODES = ("title", "app", "off")
+
+
+def _record(value):
+    apps = value.get("apps", "title")
+    if apps not in APP_RECORD_MODES:
+        raise ValueError("アプリの記録のしかたが正しくありません")
+    return {"apps": apps, "files": bool(value.get("files", True)), "git": bool(value.get("git", True)),
+            "recent_files": bool(value.get("recent_files", True))}
 
 
 def _claude_code(value):
@@ -200,6 +235,7 @@ VALIDATORS = {
     "leave_after_hours": _number(1, 24),
     "wifi": _wifi,
     "watch_folders": _str_list,
+    "record": _record,
     "excluded_apps": lambda v: [s.lower() for s in _str_list(v)],
     "browsers": _browsers,
     "git_notify": _git_notify,

@@ -225,6 +225,9 @@ input:focus, textarea:focus, select:focus, .btn:focus-visible, a:focus-visible {
 }
 textarea { width: 100%; resize: vertical; line-height: 1.7; }
 label.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+/* 記録する材料：1 行に 1 つ。説明が折り返しても、チェックボックスは 1 行目にそろえる */
+#record-form label.check { display: flex; align-items: flex-start; margin: 6px 0; }
+#record-form label.check input { margin-top: 3px; flex: none; }
 /* タッチ端末：入力欄を選んだときに iPhone が画面を拡大しないよう 16px 以上にする */
 @media (hover: none) {
   input[type=text], input[type=number], input[type=datetime-local], input[type=date], textarea, select { font-size: calc(16px * var(--fs)); }

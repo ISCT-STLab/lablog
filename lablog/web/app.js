@@ -14,7 +14,12 @@ const touch = matchMedia("(hover: none)").matches;
 
 async function toJson(res) {
   const data = await res.json().catch(() => ({ error: "応答を読み取れませんでした" }));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText);
+    // 合言葉の Cookie が無い（ブックマークから直接開いた・別のアカウントから開いた）
+    if (data.code === "key_required") err.name = "KeyRequired";
+    throw err;
+  }
   return data;
 }
 const api = cloud ? {
@@ -441,6 +446,10 @@ async function route() {
     else { setTab("day"); await renderDay(arg); }
   } catch (e) {
     if (e.name === "SignInRequired") return renderSignIn();
+    if (e.name === "KeyRequired") {
+      view.innerHTML = `<div class="card"><b>LabLog から開き直してください</b><p class="muted">${esc(e.message)}</p></div>`;
+      return;
+    }
     view.innerHTML = `<div class="card"><b>読み込めませんでした</b><p class="muted">${esc(e.message)}</p></div>`;
   }
 }
@@ -454,6 +463,7 @@ async function renderDay(dateArg, { keepScroll = false } = {}) {
   const scrollY = window.scrollY;
   state.tips = [];
   const names = day.category_names;
+  const rec = recordFlags();
   const loc = day.work_by_location;
   const locText = ["大学", "自宅", "その他"].filter((k) => loc[k] >= 60)
     .map((k) => `${placeName(k)} ${fmtDur(loc[k])}`).join("・") || "記録なし";
@@ -498,31 +508,31 @@ async function renderDay(dateArg, { keepScroll = false } = {}) {
           <button class="btn btn-sm" id="add-stay">＋ 追加</button></div>
         <div id="stays">${staysHTML(day)}</div>
       </section>
-      ${cloud ? "" : `<section class="card">
+      ${cloud ? "" : `${shown(rec.apps, day.apps) ? `<section class="card">
         <div class="card-head"><h2>アプリ・ウィンドウ</h2><span class="sub">${day.apps.length} 個のアプリ</span></div>
         <div class="scroll">${appsHTML(day, names)}</div>
-      </section>
-      <section class="card">
+      </section>` : ""}
+      ${shown(rec.files, day.files_total) ? `<section class="card">
         <div class="card-head"><h2>編集したファイル</h2><span class="sub">${day.files_total} 件</span></div>
         <div class="scroll">${filesHTML(day)}</div>
-      </section>
-      <section class="card">
+      </section>` : ""}
+      ${shown(rec.git, day.commits) ? `<section class="card">
         <div class="card-head"><h2>Git</h2><span class="sub">コミット ${day.commits.length} 件</span></div>
         ${gitHTML(day)}
-      </section>
-      <section class="card">
+      </section>` : ""}
+      ${shown(rec.recent, day.recent) ? `<section class="card">
         <div class="card-head"><h2>開いたファイル</h2><span class="sub">Windows の「最近使ったファイル」</span></div>
         <div class="scroll">${recentHTML(day)}</div>
-      </section>
-      <section class="card">
+      </section>` : ""}
+      ${shown(rec.screen, day.screen_texts) ? `<section class="card">
         <div class="card-head"><h2>画面から読み取った文字</h2><span class="sub">日報の材料（この PC の中だけ・数日で消えます）</span></div>
         <div class="scroll">${screenTextsHTML(day)}</div>
-      </section>
-      <section class="card">
+      </section>` : ""}
+      ${shown(rec.web, day.web_total) ? `<section class="card">
         <div class="card-head"><h2>閲覧したページ</h2><span class="sub">Chrome・Edge ${day.web_total} 件${day.web_hidden
           ? `（画面に表示しなかったタブ ${day.web_hidden} 件は除いています）` : ""}</span></div>
         <div class="scroll">${webHTML(day, names)}</div>
-      </section>`}
+      </section>` : ""}`}
     </div>`;
 
   setLevel(levelOf(effortSec(day.work_total, day.stay_total)));
@@ -1057,6 +1067,17 @@ function downloadCSV(m) {
 
 // ------------------------------------------------------------ 設定
 
+// 記録する材料のオンオフ（設定を読めていないときは全部オンとみなす）
+function recordFlags() {
+  const s = state.settings && state.settings.settings;
+  if (!s) return { apps: true, files: true, git: true, recent: true, screen: true, web: true };
+  const r = s.record || {};
+  return { apps: r.apps !== "off", files: r.files !== false, git: r.git !== false, recent: r.recent_files !== false,
+           screen: !!s.screen_text.enabled, web: !!(s.browsers.chrome || s.browsers.edge) };
+}
+// オフにした材料の欄は隠す。ただし、その日の記録があれば（オフにする前の日など）出す
+const shown = (on, data) => on || (Array.isArray(data) ? data.length > 0 : !!data);
+
 async function loadSettings() {
   state.settings = await api.get("/api/settings");
   return state.settings;
@@ -1090,9 +1111,29 @@ async function renderSettings() {
 
   const catNames = s.categories.map((c) => c.name).concat(["その他"]);
 
+  const rec = s.record;
+  const appsOption = (value, label) => `<option value="${value}" ${rec.apps === value ? "selected" : ""}>${label}</option>`;
+
   view.innerHTML = `
     <div class="page-head"><h1>設定</h1></div>
     <div class="grid">
+      <section class="card span-2">
+        <div class="card-head"><h2>記録する材料</h2><span class="sub">どれもこの PC の中だけに保存し、日報の材料にします</span></div>
+        <form id="record-form">
+          <label class="field"><span>使ったアプリとウィンドウ</span>
+            <select name="apps">${appsOption("title", "アプリ名とウィンドウ名を記録する")}${appsOption("app", "アプリ名だけ記録する")}${appsOption("off", "記録しない（PC作業時間だけ残す）")}</select></label>
+          <p class="help">ウィンドウ名には、開いている文書やページの名前が出ます。ウィンドウ名を記録しないと、ブラウザで見ていたサイトの分類や、日報の作業内容が分かりにくくなります。</p>
+          <label class="check"><input type="checkbox" name="files" ${rec.files ? "checked" : ""}> 監視するフォルダで編集したファイル（パス・時刻・サイズだけ。中身は読みません）</label>
+          <label class="check"><input type="checkbox" name="git" ${rec.git ? "checked" : ""}> 監視するフォルダにある Git リポジトリのコミットと、未コミットの変更</label>
+          <label class="check"><input type="checkbox" name="chrome" ${s.browsers.chrome ? "checked" : ""}> Chrome の閲覧履歴（シークレットウィンドウは対象外）</label>
+          <label class="check"><input type="checkbox" name="edge" ${s.browsers.edge ? "checked" : ""}> Edge の閲覧履歴（InPrivate ウィンドウは対象外）</label>
+          <label class="check"><input type="checkbox" name="recent" ${rec.recent_files ? "checked" : ""}> Windows の「最近使ったファイル」</label>
+          <label class="check"><input type="checkbox" name="claude" ${s.claude_code.enabled ? "checked" : ""}> Claude Code の会話の題名と作業フォルダ（会話の中身は記録しません）</label>
+          <label class="check"><input type="checkbox" name="ocr" ${s.screen_text.enabled ? "checked" : ""}> 画面の文字（対象のアプリが前面にあるときだけ読み取ります。対象と間隔は「ウィンドウ名から分からない作業」で変えられます）</label>
+          <div class="row"><span class="spacer"></span><button class="btn btn-primary" type="submit">保存</button></div>
+        </form>
+      </section>
+
       <section class="card">
         <div class="card-head"><h2>Wi-Fi の登録</h2></div>
         <p class="help">いま接続中：<b>${esc(current || "なし")}</b>（${where}）</p>
@@ -1141,6 +1182,7 @@ async function renderSettings() {
         <div class="card-head"><h2>ローカルAI（日報の要約）</h2></div>
         <p class="help" id="ollama-state"><span class="tag">確認中…</span></p>
         <form id="ollama-form">
+          <label class="check"><input type="checkbox" name="enabled" ${s.ollama.enabled ? "checked" : ""}> 日報に AI を使う（使わないときは、集計から箇条書きの下書きを作ります）</label>
           <label class="field"><span>モデル名</span><input type="text" name="model" value="${esc(s.ollama.model)}"></label>
           <label class="check"><input type="checkbox" name="auto" ${s.ollama.auto ? "checked" : ""}> 退出確定時と日付の切り替わりに、日報の下書きを自動で作る</label>
           <p class="help">接続先は PC 内（${esc(s.ollama.url)}）だけです。記録が外部に送られることはありません。</p>
@@ -1163,10 +1205,8 @@ async function renderSettings() {
       <section class="card">
         <div class="card-head"><h2>ウィンドウ名から分からない作業</h2></div>
         <form id="insight-form">
-          <label class="check"><input type="checkbox" name="claude" ${s.claude_code.enabled ? "checked" : ""}> Claude Code の会話の題名と作業フォルダを記録する</label>
-          <p class="help">ウィンドウ名が「Claude」だけのときに、そのとき使っていた会話の題名で補います。会話の中身は記録しません。</p>
-          <label class="check"><input type="checkbox" name="ocr" ${s.screen_text.enabled ? "checked" : ""}> 下のアプリが前面にあるとき、画面の文字を読み取って日報の材料にする</label>
-          <label class="field" style="margin-top:8px"><span>対象のアプリ（実行ファイル名を 1 行に 1 つ）</span>
+          <p class="help">Claude Code の会話の題名は、ウィンドウ名が「Claude」だけのときに補うために使います。画面の文字は、下のアプリが前面にあるときに読み取って日報の材料にします。どちらも「記録する材料」でオンオフできます。</p>
+          <label class="field" style="margin-top:8px"><span>画面の文字を読み取るアプリ（実行ファイル名を 1 行に 1 つ）</span>
             <textarea name="apps" rows="6">${esc(s.screen_text.apps.join("\n"))}</textarea></label>
           <p class="help">ウィンドウ名から作業内容が分からないアプリだけを入れます。ブラウザ（閲覧履歴を使う）、Word・Excel・PowerPoint・VS Code・Notion（ウィンドウ名に文書やページの名前が出る）、エクスプローラー、Git（コミットを記録する）は入れなくて大丈夫です。</p>
           <div class="row">
@@ -1200,8 +1240,6 @@ async function renderSettings() {
         <form id="exclude-form">
           <textarea name="apps" rows="4">${esc(s.excluded_apps.join("\n"))}</textarea>
           <div class="row" style="margin-top:8px">
-            <label class="check"><input type="checkbox" name="chrome" ${s.browsers.chrome ? "checked" : ""}> Chrome の履歴を記録</label>
-            <label class="check"><input type="checkbox" name="edge" ${s.browsers.edge ? "checked" : ""}> Edge の履歴を記録</label>
             <span class="spacer"></span>
             <button class="btn btn-primary" type="submit">保存</button>
           </div>
@@ -1232,7 +1270,9 @@ async function renderSettings() {
   api.get("/api/ollama").catch(() => ({ running: false })).then((o) => {
     const el = $("#ollama-state");
     if (!el) return;
-    if (!o.running) {
+    if (!s.ollama.enabled) {
+      el.innerHTML = `<span class="tag">使わない設定</span> 日報は集計から作ります。`;
+    } else if (!o.running) {
       el.innerHTML = `<span class="tag warn">Ollama が起動していません</span> 日報は集計から作ります。`;
     } else if (!o.model_ready) {
       el.innerHTML = `<span class="tag warn">モデル ${esc(s.ollama.model)} が未ダウンロード</span> ターミナルで <code>ollama pull ${esc(s.ollama.model)}</code> を実行してください。`;
@@ -1293,20 +1333,32 @@ async function renderSettings() {
       renderSettings();
     } catch (err) { alert(err.message); }
   });
+  $("#record-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const ok = await saveSettings({
+      record: { apps: f.apps.value, files: f.files.checked, git: f.git.checked, recent_files: f.recent.checked },
+      browsers: { chrome: f.chrome.checked, edge: f.edge.checked },
+      claude_code: { enabled: f.claude.checked },
+      screen_text: { ...s.screen_text, enabled: f.ocr.checked },
+    });
+    if (ok) renderSettings();
+  });
   $("#git-form").addEventListener("submit", (e) => {
     e.preventDefault();
     saveSettings({ git_notify: { enabled: e.target.enabled.checked, hours: Number(e.target.hours.value) } });
   });
   $("#ollama-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (await saveSettings({ ollama: { url: s.ollama.url, model: e.target.model.value, auto: e.target.auto.checked } })) renderSettings();
+    const f = e.target;
+    if (await saveSettings({ ollama: { enabled: f.enabled.checked, url: s.ollama.url, model: f.model.value,
+                                       auto: f.auto.checked } })) renderSettings();
   });
   $("#insight-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
-    if (await saveSettings({ claude_code: { enabled: f.claude.checked },
-      screen_text: { enabled: f.ocr.checked, apps: lines(f.apps.value), interval_min: Number(f.interval.value),
-                     keep_days: Number(f.keep.value) } })) renderSettings();
+    if (await saveSettings({ screen_text: { enabled: s.screen_text.enabled, apps: lines(f.apps.value),
+                                            interval_min: Number(f.interval.value), keep_days: Number(f.keep.value) } })) renderSettings();
   });
   $("#ocr-clear").addEventListener("click", async () => {
     if (!confirm("画面から読み取った文字をすべて消します。日報の材料からもなくなります。よろしいですか？")) return;
@@ -1320,8 +1372,7 @@ async function renderSettings() {
   });
   $("#exclude-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    saveSettings({ excluded_apps: lines(e.target.apps.value),
-      browsers: { chrome: e.target.chrome.checked, edge: e.target.edge.checked } });
+    saveSettings({ excluded_apps: lines(e.target.apps.value) });
   });
   $("#cat-add").addEventListener("click", () => {
     const rows = $("#cat-rows");

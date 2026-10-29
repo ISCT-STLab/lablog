@@ -21,7 +21,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import db
+from . import VIEWER_URL, db
 from .categorize import Categorizer
 from .config import DAY_START_HOUR
 from .days import day_range, logical_date, parse_date
@@ -163,7 +163,8 @@ class CloudSync:
 
     def status(self) -> dict:
         cfg = self._cfg()
-        return {"enabled": cfg["enabled"], "viewer_url": cfg["viewer_url"],
+        # viewer_url が空なら配布元のブラウザ版（自分用にテスト版を使うときだけ設定で変える）
+        return {"enabled": cfg["enabled"], "viewer_url": cfg["viewer_url"] or VIEWER_URL,
                 "folder": str(self.folder) if self.folder else None,
                 "last_export": self.last_export, "last_error": self.last_error}
 
