@@ -164,6 +164,10 @@ class Api:
         folders = [f for f in self.app.settings.get("watch_folders") if f != body.get("path")]
         return self.post_settings({"watch_folders": folders})
 
+    def post_quit(self, body):
+        self.app.quit()
+        return {"ok": True}
+
     def post_ollama_setup(self, body):
         """Ollama のインストール（install）と、モデルのダウンロード（model）を始める。"""
         try:
@@ -316,7 +320,7 @@ POST_ROUTES = {"/api/settings": "post_settings", "/api/categories/reset": "post_
                "/api/update/check": "post_update_check", "/api/update/install": "post_update_install", "/api/stay/save": "post_stay_save",
                "/api/stay/delete": "post_stay_delete", "/api/report/generate": "post_report_generate",
                "/api/report/save": "post_report_save", "/api/cloud/export": "post_cloud_export", "/api/cloud/takeover": "post_cloud_takeover",
-               "/api/screen_texts/clear": "post_screen_texts_clear"}
+               "/api/screen_texts/clear": "post_screen_texts_clear", "/api/quit": "post_quit"}
 
 
 KEY_REQUIRED = {"error": "このページを開くには合言葉が要ります。スタートメニューの「LabLog」から開き直してください。",

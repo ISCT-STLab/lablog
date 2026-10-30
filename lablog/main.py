@@ -41,6 +41,16 @@ SCRIPT = Path(sys.argv[0]).resolve()
 COLLECT_SEC = 300
 SCREEN_TEXT_CHECK_SEC = 15
 REPO_DISCOVER_SEC = 1800
+PORT_TRIES = 10            # 設定のポートが使われていたら、続きの番号を順に試す
+RUNNING_PORT = "port.txt"  # 動いている LabLog のポート（スタートメニューからもう一度開いたときに使う）
+
+
+def running_port(default: int) -> int:
+    """動いている LabLog のポート（設定のポートが使われていて、別のポートで起動していることがある）。"""
+    try:
+        return int((data_dir() / RUNNING_PORT).read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return default
 
 
 class App:
@@ -49,6 +59,7 @@ class App:
         self.conn = db.connect()
         db.init(self.conn)
         self.port = self.settings.get("port")
+        self.fixed_port = False  # テスト用に --port を指定したときは、ほかのポートを試さない
         self._paused = db.kv_get(self.conn, "paused") == "1"
         base = install_base()
         installed = read_versions(base) if base else {}
@@ -131,6 +142,11 @@ class App:
             self.watchers.sync(self._watched_folders())
             self._repos_stale = True
             self._wake.set()
+
+    def quit(self):
+        """LabLog を終わらせる（設定の画面の「LabLog を終了」）。もう一度使うときは、スタートメニューから起動する。"""
+        log.info("LabLog を終了します（設定の画面から）")
+        threading.Timer(1.0, os._exit, (0,)).start()  # 画面への応答を返してから終わる
 
     def restart(self):
         """LabLog を起動し直す（更新したあと）。新しいプロセスは、このプロセスが終わるのを待ってから起動する。"""
@@ -331,13 +347,25 @@ class App:
                 log.exception("日報の自動作成でエラーが起きました")
 
     def run(self, open_browser: bool):
-        try:
-            server = make_server(self, self.port, dashboard_key())
-        except OSError:
-            log.exception("ポート %s を使えません", self.port)
+        ports = [self.port] if self.fixed_port else list(range(self.port, self.port + PORT_TRIES))
+        server = None
+        for port in ports:
+            try:
+                server = make_server(self, port, dashboard_key())
+                break
+            except OSError:
+                log.warning("ポート %s を使えません（ほかのアプリが使っています）", port)
+        if server is None:
             show_toast("LabLog を起動できませんでした",
-                       f"ポート {self.port} が他のアプリに使われています。設定ファイルの port を変えてください。")
+                       f"ポート {ports[0]}〜{ports[-1]} が、ほかのアプリに使われています。")
             return
+        if port != self.port:
+            log.info("ポート %s が使われていたため、%s で起動します", self.port, port)
+        self.port = port
+        try:
+            (data_dir() / RUNNING_PORT).write_text(str(port), encoding="ascii")
+        except OSError:
+            pass
         self.watchers.sync(self._watched_folders())
         for target, name in ((self.activity_loop, "activity"), (self.collect_loop, "collect"),
                              (self.report_loop, "report"), (self.cloud.loop, "cloud"),
@@ -385,12 +413,14 @@ def main(argv=None):
     if acquire_single_instance(mutex_name) is None:
         # すでに起動している場合は、ダッシュボードを開くだけにする
         if not args.no_browser:
-            webbrowser.open(f"http://127.0.0.1:{args.port or Settings().get('port')}/?key={dashboard_key()}")
+            port = args.port or running_port(Settings().get("port"))
+            webbrowser.open(f"http://127.0.0.1:{port}/?key={dashboard_key()}")
         return
     apply_pending_restore()  # バックアップから戻すとき：DB を開く前に差し替える
     app = App()
     if args.port:
         app.port = args.port
+        app.fixed_port = True
         app.extra_args += ["--port", str(args.port)]
     if args.data_dir:
         app.extra_args += ["--data-dir", args.data_dir]

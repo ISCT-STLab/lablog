@@ -155,6 +155,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=15000")
     conn.execute("PRAGMA secure_delete=ON")  # 消した記録（画面の文字など）の中身を、ファイルにも残さない
+    # WAL は自動のチェックポイント（約 4 MB ごと）で使い回すが、一度大きくなると縮まないので、上限を決めておく
+    conn.execute("PRAGMA journal_size_limit=8388608")
     return conn
 
 
