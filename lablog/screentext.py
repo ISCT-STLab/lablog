@@ -80,5 +80,6 @@ class ScreenTextRecorder:
         return True
 
     def cleanup(self, now: float, keep_days: float):
-        if self.conn.execute("DELETE FROM screen_texts WHERE ts < ?", (now - keep_days * 86400,)).rowcount:
+        deleted = self.conn.execute("DELETE FROM screen_texts WHERE ts < ?", (now - keep_days * 86400,)).rowcount
+        if deleted or db.kv_get(self.conn, "wal_wipe_pending") == "1":
             db.forget_deleted(self.conn)

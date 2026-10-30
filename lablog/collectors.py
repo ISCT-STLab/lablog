@@ -167,6 +167,8 @@ def import_claude_code(conn, now: float, root: Path | None = None):
     floor = enabled_since(conn, "claude_code")
     pauses = paused_ranges(conn, 0, now, now)
     paused_now = conn.execute("SELECT 1 FROM pauses WHERE end_ts IS NULL").fetchone() is not None
+    # 前回すべてのファイルを読んだ時刻。それより後に書き足された分は、前回から今までに書かれたもの
+    scanned = float(kv_get(conn, "claude:scanned_at", 0) or 0)
     for path in root.glob("*/*.jsonl"):
         key = f"claude:{path}"
         size = path.stat().st_size
@@ -202,9 +204,13 @@ def import_claude_code(conn, now: float, root: Path | None = None):
             near[i] = near[i] if near[i] is not None else nxt
 
         def allowed(ts):  # 初回の設定より前・オフにしていた期間・一時停止中の分は取り込まない
-            if ts is None:  # 前後のどの行にも時刻が無い：いま書かれたものとみなす
-                return not paused_now and now >= floor
-            return not (first and ts < since) and ts >= floor and not in_ranges(ts, pauses)
+            return ts is not None and not (first and ts < since) and ts >= floor and not in_ranges(ts, pauses)
+
+        # 題名の変更の行には時刻が無いので、いつ付けたかは「前回読んでから今まで」としか分からない。
+        # そのあいだに一時停止やオフがあれば（いま止めていても）、題名は取り込まない（前後の行の時刻は根拠にしない）
+        read_from = scanned or since  # 前回の読み込みのあとにできたファイルも、前回から今までに書かれたもの
+        titles_ok = (not paused_now and floor <= read_from
+                     and not paused_ranges(conn, read_from, now, now))
 
         sessions: dict[str, dict] = {}
         minutes: set[tuple[str, float]] = set()
@@ -212,7 +218,7 @@ def import_claude_code(conn, now: float, root: Path | None = None):
             sid = line["sessionId"]
             s = sessions.setdefault(sid, {"title": None, "folder": None, "first": None, "last": None})
             kind = line.get("type")
-            if kind in ("custom-title", "agent-name") and not allowed(ref):
+            if kind in ("custom-title", "agent-name") and not (titles_ok and allowed(ref)):
                 continue
             if kind == "custom-title" and isinstance(line.get("customTitle"), str):
                 s["title"] = line["customTitle"].strip()[:100] or s["title"]
@@ -239,6 +245,7 @@ def import_claude_code(conn, now: float, root: Path | None = None):
         conn.executemany("INSERT OR IGNORE INTO ai_activity (source, session_id, minute) VALUES ('claude-code', ?, ?)",
                          sorted(minutes))
         kv_set(conn, key, max(offset, 0) + end)
+    kv_set(conn, "claude:scanned_at", now)
 
 
 # ---------------------------------------------------------------- 最近使ったファイル

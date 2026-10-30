@@ -333,5 +333,132 @@ class UninstallUnlinkTest(unittest.TestCase):
         self.assertTrue((self.folder / "days").exists())
 
 
+# ---------------------------------------------------------------- 1.0.0b3 の再レビュー（R は再レビューの検証の番号）
+
+class RestoreFailureTest(unittest.TestCase):
+    """R12：戻している途中で失敗しても、いまの記録と設定は消えない。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = Path(tmp.name)
+        patcher = mock.patch.dict(os.environ, {"LABLOG_DATA_DIR": str(self.data)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def make(self, stays, marker):
+        conn = db.connect()
+        db.init(conn)
+        for i in range(stays):
+            conn.execute("INSERT INTO stays (start_ts, end_ts, status) VALUES (?, ?, 'closed')",
+                         (1_800_000_000 + i * 86400, 1_800_000_000 + i * 86400 + 3600))
+        (self.data / "settings.json").write_text(json.dumps({"marker": marker}), encoding="utf-8")
+        return conn
+
+    def test_move_failure_keeps_current_files(self):
+        conn = self.make(3, "戻す記録")
+        zip_bytes = backup.make_backup(conn)
+        conn.close()
+        for p in self.data.iterdir():
+            if p.is_file():
+                p.unlink()
+        self.make(1, "いまの記録").close()
+        backup.queue_restore(zip_bytes)
+        real_move = shutil.move
+
+        def failing_move(src, dst):  # 設定を退避するところで失敗させる
+            if Path(src).name == "settings.json":
+                raise OSError("disk error")
+            return real_move(src, dst)
+        with mock.patch.object(backup.shutil, "move", failing_move):
+            self.assertFalse(backup.apply_pending_restore())
+        self.assertEqual(json.loads((self.data / "settings.json").read_text(encoding="utf-8"))["marker"], "いまの記録")
+        c = sqlite3.connect(self.data / "lablog.db")
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM stays").fetchone()[0], 1)
+        c.close()
+        self.assertFalse((self.data / "restore-staging").exists())
+
+
+class PausedTitleTest(unittest.TestCase):
+    """R02：一時停止中につけた会話の題名は、前後の行の時刻に関わらず取り込まない。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patcher = mock.patch.object(collectors, "first_since", return_value=0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.now = time.time()
+        self.conn = make_conn()
+        (self.root / "p").mkdir()
+        import_claude_code(self.conn, self.now - 4000, self.root)  # 前回の読み込み（一時停止の前）
+
+    def write(self, lines):
+        with open(self.root / "p" / "s.jsonl", "a", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(json.dumps(line) + "\n")
+
+    def titles(self):
+        return [r[0] for r in self.conn.execute("SELECT title FROM ai_sessions WHERE title IS NOT NULL")]
+
+    def test_title_next_to_line_before_pause(self):
+        self.write([{"sessionId": "s", "type": "user", "timestamp": PauseTest.iso(self.now - 3000)},
+                    {"sessionId": "s", "type": "custom-title", "customTitle": "SECRET_TITLE"}])
+        self.conn.execute("INSERT INTO pauses (start_ts, end_ts) VALUES (?, ?)", (self.now - 1800, self.now - 600))
+        import_claude_code(self.conn, self.now, self.root)
+        self.assertEqual(self.titles(), [])
+
+    def test_title_only_written_while_paused(self):
+        self.conn.execute("INSERT INTO pauses (start_ts, end_ts) VALUES (?, ?)", (self.now - 1800, self.now - 600))
+        self.write([{"sessionId": "s", "type": "custom-title", "customTitle": "SECRET_TITLE"}])
+        import_claude_code(self.conn, self.now, self.root)  # 再開したあとに読んだ
+        self.assertEqual(self.titles(), [])
+        # 一時停止の無いあいだに付けた題名は取り込む
+        self.write([{"sessionId": "s", "type": "user", "timestamp": PauseTest.iso(self.now + 60)},
+                    {"sessionId": "s", "type": "custom-title", "customTitle": "LATER_TITLE"}])
+        import_claude_code(self.conn, self.now + 300, self.root)
+        self.assertEqual(self.titles(), ["LATER_TITLE"])
+
+
+class LegacyRestoreTest(unittest.TestCase):
+    """R08：前のバージョン（PC の印が無い）のバックアップを戻したら、書き出す PC の印を作り直す。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = Path(tmp.name)
+        patcher = mock.patch.dict(os.environ, {"LABLOG_DATA_DIR": str(self.data)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        conn = db.connect()
+        db.init(conn)
+        db.kv_set(conn, "device_id", "old-id")  # 1.0.0b1 の DB：device_machine が無い
+        (self.data / "settings.json").write_text("{}", encoding="utf-8")
+        zip_bytes = backup.make_backup(conn)
+        conn.close()
+        backup.queue_restore(zip_bytes)
+        self.assertTrue(backup.apply_pending_restore())
+        self.conn = db.connect()
+        self.addCleanup(self.conn.close)
+        self.sync = CloudSync(Settings(self.data / "settings.json"), dict)
+        self.folder = self.data / "od"
+        self.folder.mkdir()
+
+    def other(self, name):
+        (self.folder / "meta.json").write_text(json.dumps({"device": {"id": "old-id", "name": name},
+                                                           "exported": time.time()}), encoding="utf-8")
+        return self.sync._other_writer(self.conn, self.folder, time.time(), False)
+
+    def test_new_id(self):
+        self.assertNotEqual(self.sync._device(self.conn)["id"], "old-id")
+
+    def test_same_pc_continues(self):
+        self.assertIsNone(self.other(self.sync._device(self.conn)["name"]))
+
+    def test_other_pc_is_not_this_pc(self):
+        self.assertIsNotNone(self.other("ANOTHER-PC"))
+
+
 if __name__ == "__main__":
     unittest.main()

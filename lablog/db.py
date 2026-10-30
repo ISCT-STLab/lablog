@@ -239,12 +239,15 @@ def kv_get(conn, key: str, default=None):
     return row["value"] if row else default
 
 
-def forget_deleted(conn):
-    """消した記録が、WAL（書き込みの途中のファイル）にも残らないよう、DB 本体へ書き込んで WAL を空にする。"""
+def forget_deleted(conn) -> bool:
+    """消した記録が、WAL（書き込みの途中のファイル）にも残らないよう、DB 本体へ書き込んで WAL を空にする。
+    ほかの接続が読んでいる途中で空にできなければ、印を付けておき、次の機会（screentext.py の cleanup）にやり直す。"""
     try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError:  # ほかの接続が使っている途中：次に消したときに空にする
-        pass
+        busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+    except sqlite3.OperationalError:
+        busy = 1
+    kv_set(conn, "wal_wipe_pending", "1" if busy else "0")
+    return not busy
 
 
 def kv_set(conn, key: str, value):

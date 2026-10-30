@@ -434,5 +434,6 @@ window.LabLogCloud = (() => {
   }
 
   return { api, ready, signIn: () => signIn(), signOut, clearCache, dev: !!cfg.dev, build: cfg.build || "",
+           version: cfg.version || "",
            dismissRejected: () => save(KEY.rejected, null) };
 })();

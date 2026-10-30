@@ -14,6 +14,7 @@ before-restore-<日時> フォルダに残す。
 import io
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -110,6 +111,25 @@ def queue_restore(data: bytes) -> dict:
     return info
 
 
+def _forget_other_pc(db_file: Path):
+    """戻した記録が別の PC のもの（または、どの PC のものか分からない前のバージョンのもの）なら、
+    スマホ版へ書き出す PC の印を作り直させる（cloud.py の _device）。前の印は、同じ PC だったと分かったときのために残す。"""
+    from .cloud import machine_id
+    try:
+        conn = sqlite3.connect(db_file)
+        try:
+            kv = dict(conn.execute("SELECT key, value FROM kv WHERE key IN ('device_id', 'device_machine')").fetchall())
+            if kv.get("device_id") and kv.get("device_machine") != machine_id():
+                conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('device_id_before_restore', ?)",
+                             (kv["device_id"],))
+                conn.execute("DELETE FROM kv WHERE key IN ('device_id', 'device_machine')")
+                conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        log.exception("戻した記録の、スマホ版へ書き出す PC の印を確かめられませんでした")
+
+
 def apply_pending_restore() -> bool:
     """置いてある ZIP で記録を差し替える（DB を開く前に呼ぶ）。差し替えたら True。"""
     pending = data_dir() / PENDING
@@ -122,27 +142,46 @@ def apply_pending_restore() -> bool:
         log.exception("戻すバックアップを読めませんでした。いまの記録のまま起動します")
         pending.unlink(missing_ok=True)
         return False
+    # 1. 戻すファイルを、まず別のフォルダに書き出す（ここで失敗しても、いまの記録には触れていない）
+    stage = data_dir() / "restore-staging"
+    shutil.rmtree(stage, ignore_errors=True)
+    try:
+        stage.mkdir()
+        for name, body in content.items():
+            (stage / name).write_bytes(body)
+    except OSError:
+        log.exception("バックアップを書き出せませんでした。いまの記録のまま起動します")
+        shutil.rmtree(stage, ignore_errors=True)
+        pending.unlink(missing_ok=True)
+        return False
+    # 2. いまの記録を退避して、3. 戻すファイルと入れ替える。途中で失敗したら、置いたものだけを消して、退避したものを戻す
+    #   （退避できなかったものは、元の場所にそのまま残っている）
     keep = data_dir() / f"before-restore-{datetime.now():%Y%m%d-%H%M%S}"
     keep.mkdir()
-    moved = []
+    moved, placed = [], []
     try:
         for name in FILES + ("lablog.db-shm",):
             path = data_dir() / name
             if path.exists():
                 shutil.move(path, keep / name)
                 moved.append(name)
-        for name, body in content.items():
-            (data_dir() / name).write_bytes(body)
+        for name in content:
+            os.replace(stage / name, data_dir() / name)
+            placed.append(name)
     except OSError:
-        # 差し替えの途中で失敗した（ディスクがいっぱい など）：書きかけを消して、前の記録に戻す
         log.exception("バックアップから戻せませんでした。いまの記録のまま起動します")
-        for name in FILES + ("lablog.db-shm",):
-            if name not in moved:
-                (data_dir() / name).unlink(missing_ok=True)
+        for name in placed:
+            (data_dir() / name).unlink(missing_ok=True)
         for name in moved:
-            shutil.move(keep / name, data_dir() / name)
+            try:
+                shutil.move(keep / name, data_dir() / name)
+            except OSError:
+                log.exception("退避した記録を戻せませんでした（%s に残っています）", keep / name)
+        shutil.rmtree(stage, ignore_errors=True)
         pending.unlink(missing_ok=True)
         return False
+    shutil.rmtree(stage, ignore_errors=True)
+    _forget_other_pc(data_dir() / "lablog.db")
     pending.unlink()
     log.info("バックアップから記録を戻しました（前の記録：%s）", keep)
     return True

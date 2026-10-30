@@ -61,8 +61,8 @@ def build(site: Path, client_id: str, beta: bool = False):
         manifest = json.loads((target / "manifest.webmanifest").read_text(encoding="utf-8"))
         manifest |= {"name": "LabLog（ベータ版）", "short_name": "LabLog β"}
         (target / "manifest.webmanifest").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    # build：どのバージョンを表示しているか、ビューアーの一番下に出す（公開した日時）
-    # version：PC の LabLog がこれより古ければ、ビューアーが更新を勧める
+    # version：ビューアーの一番下に出す。PC の LabLog がこれより古ければ、ビューアーが更新を勧める
+    # build：公開した日時（一番下のバージョンにカーソルを当てると出る）
     config = json.dumps({"clientId": client_id, "version": __version__, "build": datetime.now().strftime("%m/%d %H:%M")})
     (target / "config.js").write_text(
         "// スマホ用ビューアーの設定（tools/publish_viewer.py が作る）。clientId は公開して問題ない値。\n"

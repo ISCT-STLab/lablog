@@ -239,7 +239,14 @@ class CloudSync:
         except (OSError, ValueError):
             return None
         other = meta.get("device") or {}
-        if not other.get("id") or other["id"] == self._device(conn)["id"]:  # 印が無いのは前のバージョンが書いたもの
+        mine = self._device(conn)
+        if not other.get("id") or other["id"] == mine["id"]:  # 印が無いのは前のバージョンが書いたもの
+            return None
+        if other["id"] == db.kv_get(conn, "device_id_before_restore") and other.get("name") == mine["name"]:
+            # どの PC のものか分からない記録を戻したので印を作り直したが、前の印で書き出していたのは、この PC だった
+            log.info("記録を戻す前と同じ PC なので、この PC から書き出しを続けます")
+            self._written.clear()
+            self._full = True
             return None
         exported = meta.get("exported") or 0
         if takeover or now - exported >= TAKEOVER_AFTER_SEC:
