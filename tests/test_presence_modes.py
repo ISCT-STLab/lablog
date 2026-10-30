@@ -65,7 +65,7 @@ class ModeTest(unittest.TestCase):
         return [dict(r) for r in self.conn.execute("SELECT * FROM stays ORDER BY id")]
 
     def tick(self, t, mode, wifi=OFFLINE, active=True, remote=False, idle=0):
-        return self.p.tick(T0 + t, judge_net(mode, wifi, active, remote), idle)
+        return self.p.tick(T0 + t, judge_net(mode, wifi, active, remote), idle, by_wifi=mode == "wifi" and not remote)
 
     def test_stay_mode_follows_local_activity(self):
         self.tick(0, "activity")
@@ -79,7 +79,7 @@ class ModeTest(unittest.TestCase):
         self.tick(3 * H, "activity")  # 1 時間で戻った → 滞在が続く
         self.assertEqual(self.stays()[0]["status"], "in")
         self.tick(3 * H + 15, "activity", active=False)
-        self.tick(8 * H, "activity", active=False)  # 4 時間以上戻らない → 最後に操作した時刻で退出
+        self.tick(8 * H, "activity", active=False)  # 4 時間以上戻らない → 最後に操作した時刻で退室
         stay = self.stays()[0]
         self.assertEqual(stay["status"], "closed")
         self.assertEqual(stay["end_ts"], T0 + 3 * H)
@@ -87,6 +87,7 @@ class ModeTest(unittest.TestCase):
 
     def test_remote_desktop_is_not_in_lab(self):
         self.tick(0, "wifi", UNIV)
+        self.tick(5 * MIN, "wifi", UNIV)
         self.tick(H, "wifi", UNIV, remote=True)  # 研究室のノート PC に自宅から入った
         self.assertEqual(self.stays()[0]["status"], "tentative")
         self.tick(6 * H, "wifi", UNIV, remote=True)
@@ -114,10 +115,43 @@ class ModeTest(unittest.TestCase):
 
     def test_manual_mode_pc_stopped(self):
         self.p.manual_enter(T0)
-        self.tick(15, "manual", OTHER)
+        for t in range(15, 10 * MIN + 1, 15):
+            self.tick(t, "manual", OTHER)
         self.tick(6 * H, "manual", OTHER)  # 退室を押し忘れ、PC を閉じて帰った → 最後に動いていた時刻で退室
         stay = self.stays()[0]
-        self.assertEqual((stay["status"], stay["end_ts"]), ("closed", T0 + 15))
+        self.assertEqual((stay["status"], stay["end_ts"]), ("closed", T0 + 10 * MIN))
+
+    def test_short_stays_are_not_kept(self):
+        self.p.manual_enter(T0)
+        self.p.manual_leave(T0 + 30)  # 入室をすぐ取り消した
+        self.assertEqual(self.stays(), [])
+        self.tick(H, "wifi", UNIV)
+        self.tick(H + 15, "wifi", UNIV)
+        self.tick(H + 30, "wifi", HOME)  # 研究室の Wi-Fi に一瞬つながっただけ
+        self.assertEqual(self.stays(), [])
+        self.tick(2 * H, "wifi", UNIV)
+        self.tick(2 * H + 2 * MIN, "wifi", UNIV)
+        self.tick(2 * H + 3 * MIN, "wifi", HOME)  # 2 分いた → 残す
+        self.assertEqual(len(self.stays()), 1)
+
+    def test_manual_enter_stays_when_wifi_is_unreadable(self):
+        self.p.manual_enter(T0)
+        for t in range(15, H, 15):  # Wi-Fi で判定しているが、有線・位置情報がオフで Wi-Fi 名を読めない
+            self.tick(t, "wifi", OFFLINE)
+        self.assertEqual(self.stays()[0]["status"], "in")
+        self.tick(H, "wifi", OFFLINE, remote=True)  # 外からリモートデスクトップで入った → 研究室にはいない
+        self.assertEqual(self.stays()[0]["status"], "tentative")
+
+    def test_manual_mode_resumes_after_sleep(self):
+        self.p.manual_enter(T0)
+        self.tick(15, "manual", OTHER)
+        self.tick(H, "manual", OTHER, idle=H)  # 昼休みに PC を閉じた → 仮退室
+        self.assertEqual(self.stays()[0]["status"], "tentative")
+        self.tick(H + 15, "manual", OTHER)       # 戻って操作した → 在室に戻る（入室を押し直さなくてよい）
+        self.assertEqual(self.stays()[0]["status"], "in")
+        for t in range(H + 30, 6 * H, 15):       # 午後も作業 → 昼休みの時刻で退室にしない
+            self.tick(t, "manual", OTHER)
+        self.assertEqual(self.stays()[0]["status"], "in")
 
     def test_manual_leave_waits_until_leaving_lab(self):
         self.tick(0, "wifi", UNIV)
@@ -158,16 +192,18 @@ class ModeTest(unittest.TestCase):
 
     def test_manual_enter_after_expired_tentative_opens_new_stay(self):
         self.tick(0, "wifi", UNIV)
+        self.tick(5 * MIN, "wifi", UNIV)
         self.tick(H, "wifi", OFFLINE)
         self.p.manual_enter(T0 + 6 * H)
         self.assertEqual([s["status"] for s in self.stays()], ["closed", "in"])
-        self.assertEqual(self.stays()[0]["end_ts"], T0)  # 仮退出した時刻で閉じる
+        self.assertEqual(self.stays()[0]["end_ts"], T0 + 5 * MIN)  # 仮退室した時刻で閉じる
 
     def test_manual_leave_tentative_uses_time_of_leaving(self):
         self.tick(0, "wifi", UNIV)
+        self.tick(5 * MIN, "wifi", UNIV)
         self.tick(H, "wifi", OFFLINE)
         self.p.manual_leave(T0 + 2 * H)
-        self.assertEqual(self.stays()[0]["end_ts"], T0)
+        self.assertEqual(self.stays()[0]["end_ts"], T0 + 5 * MIN)
 
 
 class ManualTimeTest(unittest.TestCase):

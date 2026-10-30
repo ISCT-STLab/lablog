@@ -1,7 +1,7 @@
 """SQLite の接続とテーブル定義。
 
-表の形を変えるときは SCHEMA を書き換えず、MIGRATIONS の最後に足す（SCHEMA は版 1 のまま）。
-移行は列や表を足すだけにする（更新に失敗して前の版に戻したときも、古い版で読めるように）。
+表の形を変えるときは SCHEMA を書き換えず、MIGRATIONS の最後に足す（SCHEMA はバージョン 1 のまま）。
+移行は列や表を足すだけにする（更新に失敗して前のバージョンに戻したときも、古いバージョンで読めるように）。
 """
 
 import logging
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT
 );
 
--- 大学での滞在。status: in（在学）/ tentative（仮退出）/ closed（確定）
+-- 大学での滞在。status: in（在学）/ tentative（仮退室）/ closed（確定）
 CREATE TABLE IF NOT EXISTS stays (
     id              INTEGER PRIMARY KEY,
     start_ts        REAL NOT NULL,
@@ -157,7 +157,7 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
-# (版, SQL)。版 2 から順に足していく
+# (バージョン, SQL)。バージョン 2 から順に足していく
 MIGRATIONS: list[tuple[int, str]] = []
 SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1
 KEEP_BACKUPS = 3
@@ -170,11 +170,11 @@ def schema_version(conn: sqlite3.Connection) -> int:
 def init(conn: sqlite3.Connection):
     conn.executescript(SCHEMA)
     version = schema_version(conn)
-    if version == 0:  # 新しく作った DB と、版を持つ前の DB は、どちらも版 1 の形
+    if version == 0:  # 新しく作った DB と、バージョンを持つ前の DB は、どちらもバージョン 1 の形
         conn.execute("PRAGMA user_version = 1")
         version = 1
     if version > SCHEMA_VERSION:
-        log.warning("この記録は新しい版の LabLog で作られています（DB の版 %s、この LabLog は %s まで）",
+        log.warning("この記録は新しいバージョンの LabLog で作られています（DB のバージョン %s、この LabLog は %s まで）",
                     version, SCHEMA_VERSION)
         return
     pending = [(v, sql) for v, sql in MIGRATIONS if v > version]
@@ -191,7 +191,7 @@ def init(conn: sqlite3.Connection):
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        log.info("DB を版 %s に移行しました", v)
+        log.info("DB をバージョン %s に移行しました", v)
 
 
 def backup(conn: sqlite3.Connection, label: str) -> Path | None:

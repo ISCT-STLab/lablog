@@ -17,6 +17,7 @@ from pathlib import Path
 from . import __version__, db, wifi
 from .activity import IDLE_EXES, ActivityRecorder
 from .aisetup import OllamaSetup
+from .backup import apply_pending_restore
 from .update import Updater
 from .cloud import CloudSync
 from .collectors import (commit_reminders, discover_repos, import_browser_history, import_claude_code,
@@ -35,6 +36,8 @@ from .winapi import (CREATE_NO_WINDOW, acquire_single_instance, foreground_windo
 log = logging.getLogger("lablog")
 
 PRESENCE_CHECK_SEC = 15  # 入退室の判定（Wi-Fi の確認）の間隔
+# 起動したスクリプト。起動したあとで作業フォルダを移す（main）ので、相対パスで起動されたときのために先に決めておく
+SCRIPT = Path(sys.argv[0]).resolve()
 COLLECT_SEC = 300
 SCREEN_TEXT_CHECK_SEC = 15
 REPO_DISCOVER_SEC = 1800
@@ -49,7 +52,7 @@ class App:
         self._paused = db.kv_get(self.conn, "paused") == "1"
         base = install_base()
         installed = read_versions(base) if base else {}
-        # update_failed：更新した版を起動できず、ランチャーが前の版に戻したとき（launcher.pyw）
+        # update_failed：更新したバージョンを起動できず、ランチャーが前のバージョンに戻したとき（launcher.pyw）
         self._status = {"state": "out", "net": wifi.OFFLINE, "ssids": [], "wifi_error": None,
                         "location": "その他", "idle": 0, "started": time.time(), "version": __version__,
                         "update_failed": installed.get("failed")}
@@ -115,7 +118,7 @@ class App:
     def restart(self):
         """LabLog を起動し直す（更新したあと）。新しいプロセスは、このプロセスが終わるのを待ってから起動する。"""
         base = install_base()
-        script = base / "LabLog.pyw" if base else Path(sys.argv[0]).resolve()
+        script = base / "LabLog.pyw" if base else SCRIPT
         args = [sys.executable, str(script), "--no-browser", *self.extra_args, "--after", str(os.getpid())]
         log.info("LabLog を起動し直します: %s", args)
         subprocess.Popen(args, cwd=str(script.parent), creationflags=CREATE_NO_WINDOW)
@@ -140,8 +143,10 @@ class App:
             log.info("滞在 %s: id=%s %s", kind, stay_id, dict(row) if row else "")
             if row:
                 self.cloud.mark_dirty(logical_date(row["start_ts"]))
+            elif kind == "removed":  # 1 分未満で消した滞在（ほぼ今日のもの）
+                self.cloud.mark_dirty(logical_date(time.time()))
             if kind == "closed" and row:
-                self.queue_report(logical_date(row["start_ts"]), "退出確定")
+                self.queue_report(logical_date(row["start_ts"]), "退室確定")
 
     def manual_presence(self, action: str, at: float | None = None) -> dict:
         """ダッシュボードの入室・退室ボタン。at：押し忘れたときに指定した時刻。"""
@@ -203,7 +208,8 @@ class App:
                         ssids, wifi_error, net = [], None, wifi.OFFLINE
                     if ready:  # 初回の設定の前も Wi-Fi は調べる（設定の画面で研究室の Wi-Fi を登録するため）
                         with self.presence_lock:
-                            events = presence.tick(now, judge_net(mode, net, local_active, remote), local_idle)
+                            events = presence.tick(now, judge_net(mode, net, local_active, remote), local_idle,
+                                                   by_wifi=mode == "wifi" and not remote)
                         self._presence_events(conn, events)
                 view = presence.status_view(now)
                 location = work_location(mode, net, view["state"], remote, pcfg.get("place", "home"))
@@ -347,6 +353,9 @@ def main(argv=None):
     parser.add_argument("--port", type=int, help="ダッシュボードのポート（テスト用。設定より優先）")
     parser.add_argument("--after", type=int, help="このプロセスが終わるのを待ってから起動する（起動し直すとき）")
     args = parser.parse_args(argv)
+    # インストール先（更新やアンインストールで消すフォルダ）を作業フォルダにしたままにしない。
+    # 作業フォルダは、LabLog が起動する Ollama などにも引き継がれ、そのフォルダを消せなくなる
+    os.chdir(Path.home())
     if args.data_dir:
         os.environ["LABLOG_DATA_DIR"] = args.data_dir
     if args.after:
@@ -359,6 +368,7 @@ def main(argv=None):
         if not args.no_browser:
             webbrowser.open(f"http://127.0.0.1:{args.port or Settings().get('port')}/?key={dashboard_key()}")
         return
+    apply_pending_restore()  # バックアップから戻すとき：DB を開く前に差し替える
     app = App()
     if args.port:
         app.port = args.port

@@ -1,34 +1,40 @@
-"""大学での滞在（入室・仮退出・退出確定）の判定。
+"""大学での滞在（入室・仮退室・退室確定）の判定。
 
 利用者が選んだ判定方法（設定の presence.mode）で、判定に使うものが変わる（judge_net）。
 - wifi（Wi-Fi で判定）：Wi-Fi と操作の有無で、下のルールのとおりに判定する
 - activity（この PC の操作で判定）：手元で操作しているかどうか。操作中を「大学の Wi-Fi」、操作していない・
   ロック中・リモートデスクトップ中を「Wi-Fi が切れた」とみなして、同じルールで判定する
 - manual（手動）：自動では入室にしない（ボタンだけ）。押し忘れたときのために、「判定に使わない Wi-Fi」と同じ扱いにして、
-  操作がない・PC が止まっていた時間が leave_after を超えたら、最後に操作した時刻で退出確定する
+  操作がない・PC が止まっていた時間が leave_after を超えたら、最後に操作した時刻で退室確定する
 - off（記録しない）：判定しない
 どの方法でも、リモートデスクトップで操作している間は研究室にいないとみなす。
 
 ルール
-- 大学の Wi-Fi につながる → 入室（仮退出中なら取り消して滞在を続ける）
-- Wi-Fi が切れる（スリープ・シャットダウンを含む） → 仮退出
-- 大学外の Wi-Fi につながる → 仮退出した時刻で退出確定
-- 仮退出のまま leave_after（4 時間）たつ → 仮退出した時刻で退出確定
-- 大学の Wi-Fi のまま leave_after 操作がない → 最後に操作した時刻で退出確定
+- 大学の Wi-Fi につながる → 入室（仮退室中なら取り消して滞在を続ける）
+- Wi-Fi が切れる（スリープ・シャットダウンを含む） → 仮退室
+- 大学外の Wi-Fi につながる → 仮退室した時刻で退室確定
+- 仮退室のまま leave_after（4 時間）たつ → 仮退室した時刻で退室確定
+- 大学の Wi-Fi のまま leave_after 操作がない → 最後に操作した時刻で退室確定
 - 判定に使わない Wi-Fi（テザリングなど）につながる → そのときの状態を続ける
-  （在学中なら滞在を続け、仮退出中なら仮退出のまま。新しく入室にはしない）
+  （在学中なら滞在を続け、仮退室中なら仮退室のまま。新しく入室にはしない）
 
 手動（ダッシュボードのボタン）
-- 入室 → すぐに入室。その滞在は、未登録の Wi-Fi につないでも閉じない（判定に使わない Wi-Fi と同じ扱い）
-- 退室 → いま退出確定。研究室を一度離れたと分かるまで（大学の Wi-Fi から離れる・操作をやめる）、
+- 入室 → すぐに入室。その滞在は、未登録の Wi-Fi につないでも閉じない（判定に使わない Wi-Fi と同じ扱い）。
+  PC を閉じて仮退室になっても、判定に使わない Wi-Fi のまま戻って操作すれば、在室に戻す
+- 退室 → いま退室確定。研究室を一度離れたと分かるまで（大学の Wi-Fi から離れる・操作をやめる）、
   自動では入室にしない（押したあとも研究室の Wi-Fi のまま・操作したままのことが多いため）
 """
+
+import time
+from datetime import datetime
 
 from .days import fmt_hm
 from .db import kv_get, kv_set
 from .wifi import IGNORED, LOCATION_LABELS, OFFLINE, OTHER, UNIV
 
 MANUAL_KEY = "presence_manual_stay"  # 手動で入室した滞在の id
+# これより短い滞在は残さない（入室をすぐ取り消した・Wi-Fi が一瞬つながっただけ など）
+MIN_STAY_SEC = 60
 SUPPRESS_KEY = "presence_suppress"   # "1"：手動で退室したので、自動の入室を止めている
 
 
@@ -72,14 +78,19 @@ class Presence:
                                 "ORDER BY start_ts DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
-    def tick(self, now: float, net: str, idle: float) -> list[tuple[str, int]]:
-        """1 回分の判定。起きたこと（"opened" / "closed", 滞在 id）の一覧を返す。"""
+    def tick(self, now: float, net: str, idle: float, by_wifi: bool = False) -> list[tuple[str, int]]:
+        """1 回分の判定。起きたこと（"opened" / "closed", 滞在 id）の一覧を返す。
+
+        by_wifi：Wi-Fi で判定している（リモートデスクトップ中は False）。入室ボタンで始めた滞在は、未登録の Wi-Fi や、
+        Wi-Fi が無い・読めないとき（有線・位置情報がオフ）も「判定に使わない Wi-Fi」と同じ扱いにして閉じない。
+        """
         events: list[tuple[str, int]] = []
         stay = self.open_stay()
         manual = kv_get(self.conn, MANUAL_KEY) or ""
         if stay is not None:
-            stay_net = IGNORED if net == OTHER and manual == str(stay["id"]) else net
-            stay = self._advance(stay, now, stay_net, idle, events)
+            entered = manual == str(stay["id"])  # 入室ボタンで始めた滞在
+            stay_net = IGNORED if entered and by_wifi and net in (OTHER, OFFLINE) else net
+            stay = self._advance(stay, now, stay_net, idle, events, resume=entered and idle < self.idle_threshold)
         if stay is None and manual:
             kv_set(self.conn, MANUAL_KEY, "")
         suppressed = kv_get(self.conn, SUPPRESS_KEY) == "1"
@@ -91,7 +102,7 @@ class Presence:
         return events
 
     def manual_enter(self, now: float, at: float | None = None) -> list[tuple[str, int]]:
-        """入室ボタン。仮退出中なら滞在を続け、そうでなければ新しく入室する。
+        """入室ボタン。仮退室中なら滞在を続け、そうでなければ新しく入室する。
 
         at：押し忘れたときに指定する入室の時刻。在室中に指定したときは、入室の時刻をその時刻に直す。
         """
@@ -122,7 +133,7 @@ class Presence:
         return events
 
     def manual_leave(self, now: float, at: float | None = None) -> list[tuple[str, int]]:
-        """退室ボタン。いま（仮退出中なら仮退出した時刻）で退出を確定する。at：押し忘れたときに指定する退室の時刻。"""
+        """退室ボタン。いま（仮退室中なら仮退室した時刻）で退室を確定する。at：押し忘れたときに指定する退室の時刻。"""
         stay = self.open_stay()
         if at is not None:
             if stay is None:
@@ -150,7 +161,8 @@ class Presence:
                                 (exclude,)).fetchone()
         return row[0]
 
-    def _advance(self, stay: dict, now: float, net: str, idle: float, events) -> dict | None:
+    def _advance(self, stay: dict, now: float, net: str, idle: float, events, resume: bool = False) -> dict | None:
+        """resume：入室ボタンで始めた滞在で、いま操作している（判定に使わない Wi-Fi でも仮退室から戻す）。"""
         if stay["status"] == "in" and now - stay["last_seen_ts"] > self.gap:
             self._set(stay, status="tentative", tentative_since=stay["last_seen_ts"])
 
@@ -167,7 +179,7 @@ class Presence:
 
         since = stay["tentative_since"]
         expired = now - since >= self.leave_after
-        if net == UNIV:
+        if net == UNIV or (resume and net == IGNORED):
             if expired:
                 return self._close(stay, since, "timeout", events)
             self._set(stay, status="in", tentative_since=None, last_seen_ts=now)
@@ -182,6 +194,10 @@ class Presence:
         self.conn.execute(f"UPDATE stays SET {cols} WHERE id = ?", (*fields.values(), stay["id"]))
 
     def _close(self, stay: dict, end: float, reason: str, events) -> None:
+        if end - stay["start_ts"] < MIN_STAY_SEC:
+            self.conn.execute("DELETE FROM stays WHERE id = ?", (stay["id"],))
+            events.append(("removed", stay["id"]))
+            return None
         self._set(stay, status="closed", end_ts=max(end, stay["start_ts"]), end_reason=reason,
                   tentative_since=None)
         events.append(("closed", stay["id"]))
@@ -210,10 +226,33 @@ def stay_end(stay: dict, now: float, leave_after: float) -> tuple[float, str]:
     return now, "in"
 
 
-def save_stay(conn, stay_id: int | None, start: float, end: float | None):
-    """ダッシュボードからの手動修正。"""
+def _fmt_when(ts: float, ref: float) -> str:
+    """時刻（ref と別の日なら日付も）。"""
+    d = datetime.fromtimestamp(ts)
+    day = "" if d.date() == datetime.fromtimestamp(ref).date() else f"{d.month}/{d.day} "
+    return f"{day}{d.hour}:{d.minute:02d}"
+
+
+def save_stay(conn, stay_id: int | None, start: float, end: float | None, now: float | None = None):
+    """ダッシュボード・スマホ版からの手動修正。これからの時刻や、ほかの滞在と重なる時刻は受け付けない
+    （重なると滞在時間を二重に数えてしまう）。end が None なら、開いている滞在の入室の時刻だけを直す。"""
+    now = time.time() if now is None else now
     if end is not None and end <= start:
         raise ValueError("退室は入室より後の時刻にしてください")
+    if start > now or (end is not None and end > now):
+        raise ValueError("これからの時刻は入れられません")
+    if stay_id is not None:
+        row = conn.execute("SELECT status, tentative_since FROM stays WHERE id = ?", (stay_id,)).fetchone()
+        if row is None:
+            raise ValueError("直そうとした滞在が見つかりません")
+        if end is None and row["status"] == "tentative" and start > row["tentative_since"]:
+            raise ValueError("入室は仮退室の時刻より前にしてください")
+    until = end if end is not None else now  # 開いたままの滞在は、いままで続いている
+    for other in conn.execute("SELECT * FROM stays WHERE id IS NOT ?", (stay_id,)):
+        other_end = (other["end_ts"] if other["status"] == "closed"
+                     else other["tentative_since"] if other["status"] == "tentative" else now)
+        if start < other_end and other["start_ts"] < until:
+            raise ValueError(f"ほかの入退室（{_fmt_when(other['start_ts'], start)}〜{_fmt_when(other_end, start)}）と重なっています")
     if stay_id is None:
         if end is None:
             raise ValueError("追加するときは退室時刻も入れてください")

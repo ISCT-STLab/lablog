@@ -20,12 +20,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from . import __version__, db, update
+from . import __version__, backup, db, update
 from .aisetup import setup_info
 from .config import DEFAULT_CATEGORIES
-from .days import fmt_duration, fmt_hm, logical_date, parse_date, recent_clock_time
+from .days import fmt_duration, fmt_hm, logical_date, parse_date, parse_month, recent_clock_time
 from .presence import delete_stay, save_stay
-from .report import generate_report, save_report
+from .report import MAX_REPORT_CHARS, generate_report, save_report
 from .summary import day_summary, month_summary
 from .wifi import WIFI_KINDS
 from .winapi import run_quiet
@@ -80,7 +80,7 @@ class Api:
         return day_summary(db.thread_conn(), self.app.settings, d, time.time())
 
     def get_month(self, q):
-        year, month = map(int, q["month"].split("-"))
+        year, month = parse_month(q["month"])
         return month_summary(db.thread_conn(), self.app.settings, year, month, time.time())
 
     def get_settings(self, q):
@@ -98,11 +98,16 @@ class Api:
     # ---- POST
 
     def post_settings(self, body):
+        linked = self.app.settings.get("cloud")["enabled"]
         try:
             snapshot = self.app.settings.update(body)
         except ValueError as exc:
             raise ApiError(str(exc))
         self.app.settings_changed(set(body))
+        if linked and not snapshot["cloud"]["enabled"]:
+            self.app.cloud.request_unlink()   # 連携を解除した：OneDrive の記録を消し、スマホ版をサインアウトさせる
+        elif snapshot["cloud"]["enabled"] and not linked:
+            self.app.cloud.request_export()   # 連携した：書き出し先をすぐ探す
         return {"settings": snapshot}
 
     def post_categories_reset(self, body):
@@ -173,7 +178,7 @@ class Api:
             raise ApiError(f"GitHub に問い合わせられませんでした。インターネットにつながっているか確かめてください（{exc}）")
 
     def post_update_check(self, body):
-        """「更新を確認」：GitHub の Releases に、新しい版があるかを問い合わせる。"""
+        """「更新を確認」：GitHub の Releases に、新しいバージョンがあるかを問い合わせる。"""
         channel = body.get("channel") or self.app.settings.get("update")["channel"]
         if channel != self.app.settings.get("update")["channel"]:
             self.post_settings({"update": {"channel": channel}})
@@ -184,7 +189,7 @@ class Api:
         info = self._latest(self.app.settings.get("update")["channel"])
         rel = info["latest"]
         if not info["newer"] or not rel or rel["version"] != body.get("version"):
-            raise ApiError("更新できる版が変わりました。もう一度「更新を確認」を押してください")
+            raise ApiError("更新できるバージョンが変わりました。もう一度「更新を確認」を押してください")
         try:
             self.app.updater.start(rel)
         except (RuntimeError, ValueError) as exc:
@@ -222,8 +227,10 @@ class Api:
         return {"ok": True}
 
     def post_stay_delete(self, body):
-        before = self._stay_day(int(body["id"]))
-        delete_stay(db.thread_conn(), int(body["id"]))
+        if isinstance(body.get("id"), bool) or not isinstance(body.get("id"), int):
+            raise ApiError("滞在の指定が正しくありません")
+        before = self._stay_day(body["id"])
+        delete_stay(db.thread_conn(), body["id"])
         self.app.cloud.mark_dirty(*before)
         return {"ok": True}
 
@@ -235,9 +242,24 @@ class Api:
 
     def post_report_save(self, body):
         d = parse_date(body["date"])
-        save_report(db.thread_conn(), d, str(body.get("text", "")))
+        text = body.get("text", "")
+        if not isinstance(text, str) or len(text) > MAX_REPORT_CHARS:
+            raise ApiError("日報の内容が正しくありません（長すぎる場合は短くしてください）")
+        save_report(db.thread_conn(), d, text)
         self.app.cloud.mark_dirty(d)
         return {"ok": True}
+
+    def backup_zip(self) -> bytes:
+        return backup.make_backup(db.thread_conn())
+
+    def post_backup_restore(self, raw: bytes):
+        """バックアップ（ZIP）から戻す。差し替えは起動し直したときに行うので、ここで起動し直す。"""
+        try:
+            info = backup.queue_restore(raw)
+        except ValueError as exc:
+            raise ApiError(str(exc))
+        self.app.restart()
+        return {"ok": True} | info
 
     def post_screen_texts_clear(self, body):
         db.thread_conn().execute("DELETE FROM screen_texts")
@@ -254,7 +276,7 @@ class Api:
     # ---- CSV
 
     def stays_csv(self, q) -> bytes:
-        year, month = map(int, q["month"].split("-"))
+        year, month = parse_month(q["month"])
         m = month_summary(db.thread_conn(), self.app.settings, year, month, time.time())
         buf = io.StringIO()
         w = csv.writer(buf)
@@ -343,7 +365,7 @@ def make_handler(api: Api, key: str, port: int):
                 result, status = fn(arg), 200
             except ApiError as exc:
                 result, status = {"error": str(exc)}, 400
-            except (KeyError, ValueError) as exc:
+            except (KeyError, ValueError, TypeError) as exc:
                 result, status = {"error": f"入力が正しくありません（{exc}）"}, 400
             except Exception as exc:
                 log.exception("API でエラーが起きました")
@@ -365,12 +387,23 @@ def make_handler(api: Api, key: str, port: int):
                 return self._send(200, file.read_bytes(), CONTENT_TYPES[file.suffix])
             if not self._key_ok():
                 return self._json(KEY_REQUIRED, 401)
+            if url.path == "/api/backup.zip":
+                name = f"LabLog-backup-{datetime.now():%Y%m%d-%H%M}.zip"
+                try:
+                    body = api.backup_zip()
+                except Exception as exc:
+                    log.exception("バックアップを作れませんでした")
+                    return self._json({"error": f"バックアップを作れませんでした（{exc}）"}, 500)
+                return self._send(200, body, "application/zip", {"Content-Disposition": f'attachment; filename="{name}"'})
             if url.path == "/api/export/stays.csv":
                 name = f"lablog_{q.get('month', 'export')}.csv"
                 try:
                     body = api.stays_csv(q)
                 except (KeyError, ValueError):
                     return self._json({"error": "month=YYYY-MM を指定してください"}, 400)
+                except Exception as exc:
+                    log.exception("CSV の書き出しでエラーが起きました")
+                    return self._json({"error": f"エラーが起きました（{exc}）"}, 500)
                 return self._send(200, body, "text/csv; charset=utf-8",
                                   {"Content-Disposition": f'attachment; filename="{name}"'})
             if url.path in GET_ROUTES:
@@ -385,10 +418,14 @@ def make_handler(api: Api, key: str, port: int):
                 return self._send(403, b"forbidden", "text/plain")
             if not self._key_ok():
                 return self._json(KEY_REQUIRED, 401)
+            if urlparse(self.path).path == "/api/backup/restore":  # 本文は ZIP そのもの
+                return self._call(api.post_backup_restore, raw)
             try:
                 body = json.loads(raw or b"{}")
             except ValueError:
                 return self._json({"error": "JSON が正しくありません"}, 400)
+            if not isinstance(body, dict):
+                return self._json({"error": "リクエストの形が正しくありません"}, 400)
             path = urlparse(self.path).path
             if path in POST_ROUTES:
                 return self._call(getattr(api, POST_ROUTES[path]), body)

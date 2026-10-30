@@ -19,8 +19,8 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
-  // 新しい版をすぐ使えるよう、まずネットから取り、つながらないときだけ保存しておいた分を使う
-  // GitHub Pages は 10 分間キャッシュさせるので、毎回サーバーに新しい版がないか確かめる
+  // 新しいバージョンをすぐ使えるよう、まずネットから取り、つながらないときだけ保存しておいた分を使う
+  // GitHub Pages は 10 分間キャッシュさせるので、毎回サーバーに新しいバージョンがないか確かめる
   e.respondWith(fetch(e.request, { cache: "no-cache" })
     .then((res) => {
       if (res.ok) {

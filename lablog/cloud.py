@@ -10,12 +10,15 @@
   days/YYYY-MM-DD.json 1 日分の要約
   months/YYYY-MM.json  1 か月分の集計
   edits/*.json         ビューアーで直した日報・滞在（取り込んだら消す）
+  unlinked.json        PC で連携を解除した印（ほかのファイルは消す。ビューアーはこれを見るとサインアウトする）
 """
 
 import hashlib
 import json
 import logging
 import os
+import shutil
+import sys
 import threading
 import time
 import uuid
@@ -27,7 +30,7 @@ from .categorize import Categorizer
 from .config import DAY_START_HOUR
 from .days import day_range, logical_date, parse_date
 from .presence import delete_stay, save_stay
-from .report import save_report
+from .report import MAX_REPORT_CHARS, save_report
 from .summary import day_summary, month_summary
 
 log = logging.getLogger(__name__)
@@ -35,11 +38,11 @@ MARKER_APP = "LabLog viewer"
 
 FORMAT_VERSION = 1
 MARKER = "viewer.json"
+UNLINKED = "unlinked.json"
 CHECK_SEC = 30          # 直した内容の確認・書き出しの間隔
 PERIODIC_SEC = 300      # 今日の分を書き出し直す間隔
 DETECT_SEC = 300        # 書き出し先が見つからないときに探し直す間隔
 REJECT_AFTER_SEC = 600  # 読めない修正ファイルを、同期の途中ではないとみなすまでの時間
-MAX_REPORT_CHARS = 50_000
 # 書き出す PC は 1 台だけ（meta.json の device）。その PC がこれだけ書き出していなければ、ほかの PC が引き継ぐ
 TAKEOVER_AFTER_SEC = 14 * 86400
 MIN_TS, MAX_TS = 946_684_800, 4_102_444_800  # 2000〜2100 年
@@ -56,6 +59,22 @@ def onedrive_root() -> Path | None:
         if root and os.path.isdir(root):
             return Path(root)
     return None
+
+
+def onedrive_account() -> str | None:
+    """この PC の個人用 OneDrive にサインインしている Microsoft アカウント（メールアドレス）。
+
+    PC では Microsoft にサインインしない（OneDrive のフォルダに書くだけ）。スマホのビューアーで同じアカウントに
+    サインインしてもらうため、設定の画面に出す。
+    """
+    if sys.platform != "win32":
+        return None
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\OneDrive\Accounts\Personal") as key:
+            return str(winreg.QueryValueEx(key, "UserEmail")[0]) or None
+    except OSError:
+        return None
 
 
 def _is_viewer_marker(path: Path) -> bool:
@@ -153,6 +172,7 @@ class CloudSync:
         self.device: dict | None = None      # この PC の印（id は初回に作る。name は PC の名前）
         self.blocked_by: dict | None = None  # ほかの PC が書き出しているとき、その PC の名前と最終更新
         self._takeover = False
+        self._unlink = False
 
     def mark_dirty(self, *days: date):
         with self._lock:
@@ -162,6 +182,12 @@ class CloudSync:
     def request_export(self):
         with self._lock:
             self._force = True
+        self._wake.set()
+
+    def request_unlink(self):
+        """連携の解除（設定でオフにしたとき）。OneDrive 上の記録を消し、スマホ版をサインアウトさせる。"""
+        with self._lock:
+            self._unlink = True
         self._wake.set()
 
     def request_takeover(self):
@@ -187,7 +213,7 @@ class CloudSync:
         except (OSError, ValueError):
             return None
         other = meta.get("device") or {}
-        if not other.get("id") or other["id"] == self._device(conn)["id"]:  # 印が無いのは前の版が書いたもの
+        if not other.get("id") or other["id"] == self._device(conn)["id"]:  # 印が無いのは前のバージョンが書いたもの
             return None
         exported = meta.get("exported") or 0
         if takeover or now - exported >= TAKEOVER_AFTER_SEC:
@@ -202,8 +228,8 @@ class CloudSync:
 
     def status(self) -> dict:
         cfg = self._cfg()
-        # viewer_url が空なら配布元のブラウザ版（自分用にテスト版を使うときだけ設定で変える）
-        return {"enabled": cfg["enabled"], "viewer_url": cfg["viewer_url"] or VIEWER_URL,
+        # viewer_url が空なら配布元のブラウザ版（自分用にベータ版を使うときだけ設定で変える）
+        return {"enabled": cfg["enabled"], "viewer_url": cfg["viewer_url"] or VIEWER_URL, "account": onedrive_account(),
                 "folder": str(self.folder) if self.folder else None,
                 "last_export": self.last_export, "last_error": self.last_error, "blocked_by": self.blocked_by}
 
@@ -246,7 +272,10 @@ class CloudSync:
         with self._lock:
             force, self._force = self._force, False
             takeover, self._takeover = self._takeover, False
+            unlink, self._unlink = self._unlink, False
         if not self._cfg()["enabled"] or not self.settings.get("setup_done", True):
+            if unlink and self._cfg()["enabled"] is False:
+                self.unlink(conn, now)
             self.folder = None
             return
         folder = self._resolve_folder(now, force)
@@ -270,6 +299,26 @@ class CloudSync:
             days |= self._all_days(conn, today)
         if days or periodic:
             self.export(conn, folder, days, now)
+
+    def unlink(self, conn, now: float):
+        """OneDrive 上の記録（要約・修正・目印）を消して unlinked.json を置く。ほかの PC が書き出していれば何もしない。"""
+        folder = self._resolve_folder(now, force=True)
+        if folder is None:
+            return
+        if self._other_writer(conn, folder, now, takeover=False):
+            log.info("ほかの PC が書き出しているため、OneDrive の記録は消しません")
+            return
+        self.import_edits(conn, folder, now)  # スマホで直したまま、まだ取り込んでいない分は先に取り込む
+        for name in ("days", "months", "edits"):
+            shutil.rmtree(folder / name, ignore_errors=True)
+        for name in ("meta.json", MARKER):
+            (folder / name).unlink(missing_ok=True)
+        self._write(folder / UNLINKED, {"app": "LabLog", "unlinked": now})
+        log.info("連携を解除し、OneDrive の記録を消しました: %s", folder)
+        self.folder = None
+        self.blocked_by = None
+        self.last_export = None
+        self._written.clear()
 
     def _all_days(self, conn, today: date) -> set[date]:
         row = conn.execute("SELECT MIN(t) AS t FROM (SELECT MIN(start_ts) AS t FROM stays "

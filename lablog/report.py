@@ -244,6 +244,9 @@ def generate_report(conn, settings, d: date, force: bool = False) -> dict:
         return {"date": d.isoformat(), "text": text, "edited": 0, "generated_ts": now, "source": source}
 
 
+MAX_REPORT_CHARS = 50_000  # 画面・スマホ版から保存できる日報の長さ
+
+
 def save_report(conn, d: date, text: str):
     conn.execute("INSERT INTO reports (date, text, edited, generated_ts, source) VALUES (?, ?, 1, NULL, 'user') "
                  "ON CONFLICT(date) DO UPDATE SET text = excluded.text, edited = 1",

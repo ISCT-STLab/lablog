@@ -22,10 +22,12 @@ log = logging.getLogger(__name__)
 
 # 選べるモデル。memory_gb：これより少ないメモリでは重すぎる（Windows が報告する量は表示より少し少ないので 1 割ゆるめて比べる）
 MODELS = [
-    {"name": "qwen3:8b", "size_gb": 5.2, "memory_gb": 16, "label": "標準（日報の質がよい）"},
-    {"name": "qwen3:4b", "size_gb": 2.5, "memory_gb": 8, "label": "軽量（メモリが少ない PC 向け）"},
+    {"name": "qwen3:8b", "size_gb": 5.2, "memory_gb": 16, "label": "標準"},
+    {"name": "qwen3:4b", "size_gb": 2.5, "memory_gb": 8, "label": "軽量"},
 ]
 WINGET_ID = "Ollama.Ollama"
+# LabLog が入れたもの（Ollama・ダウンロードしたモデル）。設定と同じフォルダに置き、uninstall.ps1 が読んで、消すかを聞く
+AI_RECORD = "ai.json"
 INSTALL_TIMEOUT_SEC = 30 * 60
 START_WAIT_SEC = 120
 
@@ -76,6 +78,7 @@ class OllamaSetup:
 
     def __init__(self, settings):
         self.settings = settings
+        self.record_path = Path(settings.path).parent / AI_RECORD
         self._lock = threading.Lock()
         # state：idle / running / done / error。step：install / start / pull。progress：0〜1（分からなければ None）
         self._job: dict = {"state": "idle"}
@@ -97,6 +100,18 @@ class OllamaSetup:
     def _update(self, **fields):
         with self._lock:
             self._job.update(fields)
+
+    def _record(self, ollama: bool = False, model: str | None = None):
+        """LabLog が入れたものを ai.json に書き足す（もとから入っていたものは書かない）。"""
+        try:
+            rec = json.loads(self.record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            rec = {}
+        models = [m for m in rec.get("models") or [] if isinstance(m, str)]
+        if model and model not in models:
+            models.append(model)
+        rec = {"ollama": bool(rec.get("ollama")) or ollama, "models": models}
+        self.record_path.write_text(json.dumps(rec), encoding="utf-8")
 
     def _run(self, install: bool, model: str | None):
         try:
@@ -123,6 +138,7 @@ class OllamaSetup:
         if ollama_exe() is None:
             raise RuntimeError(f"Ollama をインストールできませんでした（winget の終了コード {result.returncode}）。"
                                "https://ollama.com/download から入れてください")
+        self._record(ollama=True)
 
     def _ensure_running(self):
         url = self.settings.get("ollama")["url"]
@@ -145,6 +161,7 @@ class OllamaSetup:
         url = cfg["url"]
         if not is_local_url(url):
             raise RuntimeError("Ollama の URL が PC 内ではありません")
+        had = ollama_status({"url": url, "model": model}).get("model_ready")
         self._update(step="pull", message=f"モデル {model} をダウンロードしています…", progress=0.0)
         body = json.dumps({"model": model, "name": model, "stream": True}).encode("utf-8")
         req = urllib.request.Request(url.rstrip("/") + "/api/pull", data=body,
@@ -161,4 +178,6 @@ class OllamaSetup:
                     self._update(progress=min(1.0, done / total))
                 if event.get("status") == "success":
                     break
+        if not had:
+            self._record(model=model)
         self.settings.update({"ollama": cfg | {"enabled": True, "model": model}})

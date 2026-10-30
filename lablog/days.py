@@ -16,8 +16,23 @@ def day_range(d: date) -> tuple[float, float]:
     return start.timestamp(), (start + timedelta(days=1)).timestamp()
 
 
+# 扱う日付の範囲（これより外は、Windows で時刻に直せず落ちることがある）
+MIN_YEAR, MAX_YEAR = 2000, 2100
+
+
 def parse_date(text: str) -> date:
-    return date.fromisoformat(text)
+    d = date.fromisoformat(str(text))
+    if not MIN_YEAR <= d.year <= MAX_YEAR:
+        raise ValueError(f"日付の範囲が正しくありません: {text}")
+    return d
+
+
+def parse_month(text: str) -> tuple[int, int]:
+    """「2026-10」を (2026, 10) にする。"""
+    year, month = map(int, str(text).split("-"))
+    if not (MIN_YEAR <= year <= MAX_YEAR and 1 <= month <= 12):
+        raise ValueError(f"月が正しくありません: {text}")
+    return year, month
 
 
 def recent_clock_time(now: float, hhmm: str) -> float:

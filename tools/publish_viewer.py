@@ -2,7 +2,7 @@
 
 ダッシュボードの画面ファイル（lablog/web）だけを公開用のフォルダに写し、ビューアー用の config.js を作る。
 記録のデータや設定は写さない。--push を付けると、コミットして GitHub に送る（gh-pages ブランチ）。
-安定版は公開用フォルダの一番上（…/lablog/）、テスト版は --beta で beta/ の下（…/lablog/beta/）に置く。
+安定版は公開用フォルダの一番上（…/lablog/）、ベータ版は --beta で beta/ の下（…/lablog/beta/）に置く。
 
   python tools/publish_viewer.py --client-id <Microsoft のアプリ ID> --push
   python tools/publish_viewer.py --beta --push
@@ -31,7 +31,7 @@ CLIENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 BRANCH = "gh-pages"
 README = f"""# LabLog ビューアー
 
-[LabLog]({VIEWER_URL}) のスマホ用の画面です（テスト版は beta/ の下）。
+[LabLog]({VIEWER_URL}) のスマホ用の画面です（ベータ版は beta/ の下）。
 PC の LabLog が OneDrive のアプリ専用フォルダに書き出した要約を、本人の Microsoft アカウントでサインインして表示します。
 このリポジトリには画面のプログラムだけがあり、記録のデータは含みません。
 """
@@ -59,9 +59,9 @@ def build(site: Path, client_id: str, beta: bool = False):
         shutil.copy2(WEB_DIR / name, target / name)
     if beta:  # ホーム画面に追加したとき、安定版と見分けられるように
         manifest = json.loads((target / "manifest.webmanifest").read_text(encoding="utf-8"))
-        manifest |= {"name": "LabLog（テスト版）", "short_name": "LabLog β"}
+        manifest |= {"name": "LabLog（ベータ版）", "short_name": "LabLog β"}
         (target / "manifest.webmanifest").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    # build：どの版を表示しているか、ビューアーの一番下に出す（公開した日時）
+    # build：どのバージョンを表示しているか、ビューアーの一番下に出す（公開した日時）
     # version：PC の LabLog がこれより古ければ、ビューアーが更新を勧める
     config = json.dumps({"clientId": client_id, "version": __version__, "build": datetime.now().strftime("%m/%d %H:%M")})
     (target / "config.js").write_text(
@@ -91,7 +91,7 @@ def main():
     parser.add_argument("--site", default=str(DEFAULT_SITE), help="公開用のフォルダ（git リポジトリ）")
     parser.add_argument("--client-id", help="Microsoft に登録したアプリの「アプリケーション (クライアント) ID」")
     parser.add_argument("--remote", default=DEFAULT_REMOTE)
-    parser.add_argument("--beta", action="store_true", help="テスト版として beta/ の下に置く")
+    parser.add_argument("--beta", action="store_true", help="ベータ版として beta/ の下に置く")
     parser.add_argument("--push", action="store_true", help="コミットして GitHub に送る")
     parser.add_argument("--message", help="コミットのメッセージ")
     args = parser.parse_args()
@@ -104,7 +104,7 @@ def main():
     where = site / "beta" if args.beta else site
     print(f"公開用のファイルを作りました: {where}（{__version__}、アプリ ID: {client_id or '未設定'}）")
     if args.push:
-        message = args.message or f"ビューアーを更新（{'テスト版' if args.beta else '安定版'} {__version__}）"
+        message = args.message or f"ビューアーを更新（{'ベータ版' if args.beta else '安定版'} {__version__}）"
         push(site, args.remote, message)
 
 

@@ -33,7 +33,10 @@ ACTIONS = {1: "added", 2: "removed", 3: "modified", 4: "renamed_from", 5: "renam
 
 IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".ipynb_checkpoints", ".idea",
                ".vscode", ".pytest_cache", ".mypy_cache", ".ruff_cache", "$recycle.bin", ".tmp.drivedownload",
-               ".tmp.driveupload"}
+               ".tmp.driveupload",
+               # ホームフォルダごと監視したときに、アプリが裏で書き続けるもの
+               "appdata", ".cache", ".npm", ".nuget", ".gradle", ".m2", ".cargo", ".rustup", ".conda", ".ollama",
+               ".local"}
 IGNORE_SUFFIXES = (".tmp", ".temp", ".swp", ".swx", "~", ".crdownload", ".partial", ".lock", ".lck",
                    ".pyc", ".aux.bak", "-journal", "-wal", "-shm")
 IGNORE_NAMES = {"desktop.ini", "thumbs.db", ".ds_store"}

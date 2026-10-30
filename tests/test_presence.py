@@ -41,7 +41,7 @@ class PresenceTest(unittest.TestCase):
         [s] = self.stays()
         self.assertEqual(s["status"], "closed")
         self.assertEqual(s["start_ts"], T0)
-        self.assertEqual(s["end_ts"], T0 + 2 * H)  # 退出時刻は Wi-Fi が切れた時刻
+        self.assertEqual(s["end_ts"], T0 + 2 * H)  # 退室時刻は Wi-Fi が切れた時刻
         self.assertEqual(s["end_reason"], "offcampus")
 
     def test_short_disconnect_continues_stay(self):
@@ -131,7 +131,7 @@ class PresenceTest(unittest.TestCase):
         self.run_ticks(T0 + H + 30 * M + 15, T0 + 2 * H, IGNORED)
         [s] = self.stays()
         self.assertEqual((s["status"], s["tentative_since"]), ("tentative", T0 + H))
-        self.run_ticks(T0 + 5 * H + 15, T0 + 5 * H + 60, IGNORED)  # 仮退出から 4 時間
+        self.run_ticks(T0 + 5 * H + 15, T0 + 5 * H + 60, IGNORED)  # 仮退室から 4 時間
         [s] = self.stays()
         self.assertEqual((s["status"], s["end_reason"], s["end_ts"]), ("closed", "timeout", T0 + H))
 

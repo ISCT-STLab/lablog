@@ -6,11 +6,14 @@
 
 import copy
 import json
+import logging
 import os
 import secrets
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "LabLog"
 # 1日の区切り。深夜 0〜5 時の作業は前日分として扱う。
@@ -113,7 +116,7 @@ DEFAULT_CATEGORIES = [
 # エクスプローラー（ウィンドウ名にフォルダ名が出る）、Git（コミットの記録がある）
 SCREEN_TEXT_APPS = ["claude.exe", "chatgpt.exe", "todo.exe", "ms-teams.exe", "teams.exe", "zoom.exe", "matlab.exe",
                     "windowsterminal.exe", "powershell.exe", "pwsh.exe"]
-# 前の版の初期値。自分で変えていなければ、読み込むときに新しい初期値へ広げる
+# 前のバージョンの初期値。自分で変えていなければ、読み込むときに新しい初期値へ広げる
 OLD_SCREEN_TEXT_APPS = [["claude.exe", "chatgpt.exe"]]
 
 DEFAULT_SETTINGS = {
@@ -124,7 +127,7 @@ DEFAULT_SETTINGS = {
     "idle_threshold_min": 5,
     "leave_after_hours": 4,
     # 入退室の判定方法（利用者が選ぶ）。mode：wifi（Wi-Fi で判定）/ activity（この PC の操作で判定）/ manual（手動）/
-    # off（記録しない）。away_min：activity のとき、手元の操作がこれだけないと仮退出にする（分）。
+    # off（記録しない）。away_min：activity のとき、手元の操作がこれだけないと仮退室にする（分）。
     # place：off のとき、PC作業時間の場所として数える所（home：自宅 / other：その他）
     "presence": {"mode": "wifi", "away_min": 15, "remote": "none", "place": "home"},
     # ignore：判定に使わない Wi-Fi（スマホのテザリングなど、大学でも大学の外でも使うもの）
@@ -143,7 +146,7 @@ DEFAULT_SETTINGS = {
     "screen_text": {"enabled": True, "apps": SCREEN_TEXT_APPS, "interval_min": 5, "keep_days": 3},
     # スマホ用ビューアーへの書き出し（要約だけ）。folder が空なら OneDrive のアプリフォルダを自動で探す。
     "cloud": {"enabled": True, "folder": "", "viewer_url": ""},
-    # 更新の確認（設定の画面のボタンを押したときだけ）。channel：stable（安定版）/ beta（テスト版も受け取る）
+    # 更新の確認（設定の画面のボタンを押したときだけ）。channel：stable（安定版）/ beta（ベータ版も受け取る）
     "update": {"channel": "stable"},
     "categories": DEFAULT_CATEGORIES,
 }
@@ -203,7 +206,7 @@ def _cloud(value):
 
 APP_RECORD_MODES = ("title", "app", "off")
 PRESENCE_MODES = ("wifi", "activity", "manual", "off")
-OLD_PRESENCE_MODES = {"carry": "wifi", "stay": "activity", "home": "off"}  # PC の使い方で選んでいた前の版の名前
+OLD_PRESENCE_MODES = {"carry": "wifi", "stay": "activity", "home": "off"}  # PC の使い方で選んでいた前のバージョンの名前
 PRESENCE_PLACES = ("home", "other")
 REMOTE_TOOLS = ("none", "rdp", "other")  # 自宅などからこの PC に入る方法（初期設定で聞く。今は案内にだけ使う）
 
@@ -293,21 +296,26 @@ class Settings:
         if self.path.exists():
             try:
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                # 初回の設定ができる前から使っている人は、設定を済ませたものとみなす
-                loaded.setdefault("setup_done", True)
-                for key, value in loaded.items():
-                    if key in self._data:
-                        # 新しい版で増えた項目（wifi の ignore など）は初期値で補う
-                        default = self._data[key]
-                        self._data[key] = default | value if isinstance(default, dict) and isinstance(value, dict) else value
-            except (OSError, ValueError):
-                pass
-        presence = self._data.get("presence")
-        if isinstance(presence, dict) and presence.get("mode") in OLD_PRESENCE_MODES:
-            presence["mode"] = OLD_PRESENCE_MODES[presence["mode"]]
-        screen = self._data.get("screen_text")
-        if isinstance(screen, dict) and screen.get("apps") in OLD_SCREEN_TEXT_APPS:
-            screen["apps"] = list(SCREEN_TEXT_APPS)
+                if not isinstance(loaded, dict):
+                    raise ValueError("形が正しくありません")
+            except (OSError, ValueError) as exc:
+                log.warning("settings.json を読めないため、初期値を使います（%s）", exc)
+                loaded = {}
+            # 初回の設定ができる前から使っている人は、設定を済ませたものとみなす
+            loaded.setdefault("setup_done", True)
+            for key, value in loaded.items():
+                if key not in self._data:
+                    continue
+                # 新しいバージョンで増えた項目（wifi の ignore など）は初期値で補う
+                default = self._data[key]
+                value = default | value if isinstance(default, dict) and isinstance(value, dict) else value
+                if key == "screen_text" and isinstance(value, dict) and value.get("apps") in OLD_SCREEN_TEXT_APPS:
+                    value["apps"] = list(SCREEN_TEXT_APPS)
+                # 手で書き換えた値なども、保存するときと同じように確かめる（前のバージョンの判定方法の名前もここで直る）
+                try:
+                    self._data[key] = VALIDATORS[key](value)
+                except (ValueError, TypeError, AttributeError, KeyError):
+                    log.warning("settings.json の %s が正しくないため、初期値を使います", key)
         self.save()
 
     def get(self, key, default=None):
@@ -324,7 +332,10 @@ class Settings:
             for key, value in patch.items():
                 if key not in VALIDATORS:
                     raise ValueError(f"不明な設定項目です: {key}")
-                checked[key] = VALIDATORS[key](value)
+                try:
+                    checked[key] = VALIDATORS[key](value)
+                except (TypeError, AttributeError, KeyError) as exc:  # 辞書のはずが数値だった など
+                    raise ValueError(f"設定の形が正しくありません: {key}") from exc
             self._data.update(checked)
             self.save()
             return copy.deepcopy(self._data)

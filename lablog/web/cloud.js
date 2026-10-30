@@ -168,6 +168,10 @@ window.LabLogCloud = (() => {
       if (!res.ok) throw await graphError(res, "から読み込めませんでした");
       return (await res.json()).value.map((x) => x.name);
     },
+    async remove(path) {
+      const res = await graph(`:/${path}`, { method: "DELETE" });
+      if (!res.ok && res.status !== 404) throw await graphError(res, "から消せませんでした");
+    },
   };
 
   const devStore = {
@@ -185,6 +189,9 @@ window.LabLogCloud = (() => {
     async list(dir) {
       const res = await fetch(`${cfg.dev}${dir}/`, { cache: "no-store" });
       return res.ok ? res.json() : [];
+    },
+    async remove(path) {
+      await fetch(cfg.dev + path, { method: "DELETE" });
     },
   };
 
@@ -281,8 +288,15 @@ window.LabLogCloud = (() => {
     } catch { /* 通信できないときは次の機会に */ }
   }
 
+  // PC が取り込み済みのもの（書き出された内容に同じものがある）は重ねない（二重に出さない）
+  const sameTime = (a, b) => a != null && b != null && Math.abs(a - b) < 1;
+  const alreadyIn = (day, e) => (e.type === "report" ? day.report && day.report.text === e.text
+    : e.type === "stay_save" ? day.stays.some((s) => (e.id == null || s.id === e.id) && sameTime(s.start, e.start)
+                                                     && (e.end == null || sameTime(s.end, e.end)))
+    : e.type === "stay_delete" ? !day.stays.some((s) => s.id === e.id) : false);
+
   function applyPending(day) {
-    const edits = pendingEdits().filter((e) => e.date === day.date);
+    const edits = pendingEdits().filter((e) => e.date === day.date && !alreadyIn(day, e));
     for (const e of edits) {
       if (e.type === "report") {
         day.report = { text: e.text, edited: 1, generated_ts: null, source: "user", pending: true };
@@ -305,16 +319,23 @@ window.LabLogCloud = (() => {
 
   async function getStatus() {
     const meta = await read("meta.json");
+    // PC で連携を解除すると、PC が記録を消して unlinked.json を置く（cloud.py の unlink）。見つけたらサインアウトする
+    if (!meta && await read("unlinked.json")) {
+      const e = new Error("PC で Microsoft アカウント連携が解除されました。");
+      e.name = "Unlinked";
+      throw e;
+    }
     await checkPending(meta);
     const base = { today: today(), offline: state.offline, pending: pendingEdits().length };
     if (!meta) return { ...base, state: "none" };
-    // app_version：PC の LabLog の版（前の版の PC は書かない）。viewer_version：このビューアーを公開したときの版
+    // app_version：PC の LabLog のバージョン（前のバージョンの PC は書かない）。viewer_version：このビューアーを公開したときのバージョン
     return { ...meta.status, ...base, exported: meta.exported, app_version: meta.app_version || null,
              viewer_version: cfg.version || null, device: meta.device ? meta.device.name : null };
   }
 
   async function getDay(date) {
     const [meta, data] = await Promise.all([read("meta.json"), read(`days/${date}.json`)]);
+    await checkPending(meta); // 取り込み済みの修正を、反映待ちの一覧から外す
     const day = data ? structuredClone(data) : emptyDay(date, meta);
     day.is_today = date === today();
     if (meta && meta.exported > day.range[0]) day.now = Math.min(meta.exported, day.range[1]);
@@ -337,6 +358,14 @@ window.LabLogCloud = (() => {
     if (!start || Number.isNaN(start) || Number.isNaN(end)) throw new Error("時刻の形式が正しくありません");
     if (end != null && end <= start) throw new Error("退室は入室より後の時刻にしてください");
     if (body.id == null && end == null) throw new Error("追加するときは退室時刻も入れてください");
+    // PC と同じ確かめ（presence.py の save_stay）。PC で受け付けられない修正は、ここで止める
+    const now = Date.now() / 1000;
+    if (start > now || (end != null && end > now)) throw new Error("これからの時刻は入れられません");
+    const day = await getDay(body.date);
+    const until = end ?? now;
+    if (day.stays.some((s) => s.id !== body.id && start < (s.state === "in" ? now : s.end) && s.start < until)) {
+      throw new Error("ほかの入退室と重なっています");
+    }
     await submitEdit({ type: "stay_save", id: body.id, start, end, date: body.date });
   }
 
@@ -373,10 +402,11 @@ window.LabLogCloud = (() => {
     const tok = load(KEY.token);
     const signedIn = !!(tok && (tok.access || tok.refresh)) || (!!tok && Date.now() - (load(KEY.silent) || 0) > 10 * 60 * 1000);
     if (signedIn && !load(KEY.marker)) {
-      // 初めて使うときは、ここで OneDrive にアプリ専用フォルダを作り、PC が書き出し先を見つけるための目印を置く
+      // 初めて使うとき（連携を解除したあとも）は、ここで OneDrive にアプリ専用フォルダを作り、PC が書き出し先を見つけるための目印を置く
       try {
         await store.ensureRoot();
         await store.write("viewer.json", { ...MARKER, signed_in: Date.now() / 1000 });
+        await store.remove("unlinked.json");
         save(KEY.marker, Date.now());
       } catch (e) {
         if (e.name === "SignInRequired") return { signedIn: false };

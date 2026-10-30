@@ -4,7 +4,7 @@
 ビューアーで直した日報・滞在は写しのほうに取り込む（本物の記録は変えない）。
 
   python tools/preview_viewer.py             → http://127.0.0.1:8770/
-  python tools/preview_viewer.py --viewer-version 9.9.9   → 新しい版のビューアーのふり（PC が古いときの表示を試す）
+  python tools/preview_viewer.py --viewer-version 9.9.9   → 新しいバージョンのビューアーのふり（PC が古いときの表示を試す）
 """
 
 import argparse
@@ -111,6 +111,12 @@ def make_handler(out: Path, viewer_version: str):
             (out / "edits" / name).write_bytes(body)
             self._send(201, b"{}", TYPES[".json"])
 
+        def do_DELETE(self):  # ビューアーがサインインしたときに消す、連携を解除した印だけ
+            if unquote(urlparse(self.path).path) != "/devdata/unlinked.json":
+                return self._send(400, b"bad name")
+            (out / "unlinked.json").unlink(missing_ok=True)
+            self._send(204, b"")
+
     return Handler
 
 
@@ -119,7 +125,7 @@ def main():
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--source", default=str(Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LabLog"),
                         help="写す元の記録のフォルダ")
-    parser.add_argument("--viewer-version", help="ビューアーの版（初めはいまの LabLog の版）")
+    parser.add_argument("--viewer-version", help="ビューアーのバージョン（初めは現在の LabLog のバージョン）")
     args = parser.parse_args()
 
     work = Path(tempfile.mkdtemp(prefix="lablog_preview_"))

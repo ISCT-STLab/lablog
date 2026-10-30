@@ -1,9 +1,9 @@
 ﻿# LabLog をこの PC に入れる（管理者の権限は要らない）。ZIP を展開したフォルダの setup.cmd から実行する。
 #   1. Python 3.11 以降があるか確かめる（無ければ winget で入れるかを聞く）
-#   2. %LOCALAPPDATA%\Programs\LabLog\versions\<版> にアプリを写し、起動用の LabLog.pyw と version.json を置く
+#   2. %LOCALAPPDATA%\Programs\LabLog\versions\<バージョン> にアプリを写し、起動用の LabLog.pyw と version.json を置く
 #   3. スタートメニューとスタートアップにショートカットを作る（ログオンしたときに自動で起動する）
 #   4. LabLog を起動する（初めてなら初期設定の画面が開く）
-# すでに入っていれば、新しい版に入れ替える。記録と設定は %LOCALAPPDATA%\LabLog にあり、そのまま引き継ぐ。
+# すでに入っていれば、新しいバージョンに入れ替える。記録と設定は %LOCALAPPDATA%\LabLog にあり、そのまま引き継ぐ。
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\LabLog"),
     [string]$ShortcutDir = "",  # テスト用：ショートカットを作るフォルダ（空ならスタートメニューとスタートアップ）
@@ -47,10 +47,13 @@ function Find-Python {
 
 $init = [IO.File]::ReadAllText((Join-Path $src "lablog\__init__.py"))
 if ($init -notmatch '__version__\s*=\s*"([^"]+)"') {
-    throw "lablog\__init__.py に版番号が見つかりません。ZIP を展開したフォルダの setup.cmd から実行してください。"
+    throw "lablog\__init__.py にバージョン番号が見つかりません。ZIP を展開したフォルダの setup.cmd から実行してください。"
 }
 $version = $Matches[1]
 Write-Host "LabLog $version をインストールします（$InstallDir）"
+Write-Host ""
+Write-Host "ご注意：LabLog は AI で作成したアプリです。動作や安全性は保証できません。"
+if (-not (Ask "インストールを続けますか？")) { return }
 
 $found = Find-Python
 if (-not $found) {
@@ -69,15 +72,17 @@ if (-not $found) {
 }
 Write-Host "Python $($found.Version)：$($found.Python)"
 
-# このインストール先から動いている LabLog を止める（ファイルを入れ替えるため）
-Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($InstallDir) } |
-    ForEach-Object {
-        Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null
-        Write-Host "動いている LabLog を止めました（PID $($_.ProcessId)）"
-    }
+# このインストール先から動いている LabLog を止め、終わるまで待つ（ファイルを入れ替えるため）。
+# Python の名前は入れ方で違う（pythonw.exe・pythonw3.13.exe など）。パスの大文字・小文字は区別しない
+$running = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" |
+    Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($InstallDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+foreach ($p in $running) {
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+    Write-Host "動いている LabLog を止めました（PID $($p.ProcessId)）"
+}
+foreach ($p in $running) { Wait-Process -Id $p.ProcessId -Timeout 15 -ErrorAction SilentlyContinue }
 
-# アプリを版ごとのフォルダに写す（いったん .tmp に写してから名前を変える）
+# アプリをバージョンごとのフォルダに写す（いったん .tmp に写してから名前を変える）
 $versions = Join-Path $InstallDir "versions"
 $dest = Join-Path $versions $version
 $tmp = "$dest.tmp"
@@ -94,7 +99,7 @@ Copy-Item -Force (Join-Path $src "launcher.pyw") (Join-Path $InstallDir "LabLog.
 foreach ($name in @("uninstall.cmd", "uninstall.ps1")) { Copy-Item -Force (Join-Path $src $name) $InstallDir }
 Get-ChildItem $InstallDir -Recurse -File | Unblock-File  # インターネットから取った印を外す
 
-# 次に起動する版を決める（いま入っている版は「前の版」として残し、更新に失敗したときに戻せるようにする）
+# 次に起動するバージョンを決める（いま入っているバージョンは「前のバージョン」として残し、更新に失敗したときに戻せるようにする）
 $vfile = Join-Path $InstallDir "version.json"
 $previous = $null
 if (Test-Path $vfile) {
@@ -124,13 +129,13 @@ foreach ($item in @(@($startup, "`"$launcher`" --no-browser", "LabLog（研究�
     $lnk = $shell.CreateShortcut($item[0])
     $lnk.TargetPath = $found.Pythonw
     $lnk.Arguments = $item[1]
-    $lnk.WorkingDirectory = $InstallDir
+    $lnk.WorkingDirectory = $env:USERPROFILE
     $lnk.Description = $item[2]
     $lnk.Save()
 }
 
 if (-not $NoStart) {
-    Start-Process -FilePath $found.Pythonw -ArgumentList "`"$launcher`"" -WorkingDirectory $InstallDir
+    Start-Process -FilePath $found.Pythonw -ArgumentList "`"$launcher`"" -WorkingDirectory $env:USERPROFILE
     Write-Host "LabLog を起動しました。ブラウザで画面が開きます（初めてなら初期設定の画面）。"
 }
 Write-Host "インストールしました：LabLog $version"

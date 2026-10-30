@@ -110,7 +110,9 @@ class CloudTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_edit(self.conn, {"type": "settings", "port": 80})
         self.assertEqual(apply_edit(self.conn, {"type": "stay_delete", "id": 999}), set())
-        self.assertEqual(apply_edit(self.conn, {"type": "stay_save", "id": None, "start": at(13), "end": at(15)}), {D})
+        with self.assertRaises(ValueError):  # 9:00〜18:00 の滞在と重なる
+            apply_edit(self.conn, {"type": "stay_save", "id": None, "start": at(13), "end": at(15)})
+        self.assertEqual(apply_edit(self.conn, {"type": "stay_save", "id": None, "start": at(19), "end": at(20)}), {D})
 
     def test_unreadable_edit_waits_for_sync(self):
         self.sync.run_once(self.conn, self.now)
@@ -202,6 +204,43 @@ class CloudTest(unittest.TestCase):
         self.sync.run_once(self.conn, self.now)  # 前の版の LabLog が書いたもの
         self.assertIsNone(self.sync.blocked_by)
         self.assertIn("device", self.meta())
+
+    # ---- 連携の解除
+
+    def unlink(self):
+        self.settings.update({"cloud": {"enabled": False, "folder": str(self.out), "viewer_url": ""}})
+        self.sync.request_unlink()
+        self.sync.run_once(self.conn, self.now + 10)
+
+    def test_unlink_removes_records_and_leaves_mark(self):
+        (self.out / "viewer.json").write_text(json.dumps({"app": "LabLog viewer"}), encoding="utf-8")
+        self.sync.run_once(self.conn, self.now)
+        self.unlink()
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["unlinked.json"])
+        self.assertIsNone(self.sync.folder)
+
+    def test_unlink_imports_edits_first(self):
+        self.sync.run_once(self.conn, self.now)
+        edits = self.out / "edits"
+        edits.mkdir()
+        (edits / "1-a.json").write_text(json.dumps({"type": "report", "date": D.isoformat(), "text": "スマホで書いた",
+                                                    "ts": self.now}), encoding="utf-8")
+        self.unlink()
+        row = self.conn.execute("SELECT text FROM reports WHERE date = ?", (D.isoformat(),)).fetchone()
+        self.assertEqual(row["text"], "スマホで書いた")
+        self.assertFalse(edits.exists())
+
+    def test_unlink_keeps_other_pc_records(self):
+        self.other_pc_wrote(ago_sec=600)
+        self.unlink()
+        self.assertEqual(self.meta()["device"]["id"], "other-pc")
+        self.assertFalse((self.out / "unlinked.json").exists())
+
+    def test_disabled_without_unlink_keeps_records(self):
+        self.sync.run_once(self.conn, self.now)
+        self.settings.update({"cloud": {"enabled": False, "folder": str(self.out), "viewer_url": ""}})
+        self.sync.run_once(self.conn, self.now + 10)  # 起動したときから連携していない（解除の操作はしていない）
+        self.assertTrue((self.out / "meta.json").exists())
 
 
 if __name__ == "__main__":

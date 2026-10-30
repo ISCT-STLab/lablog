@@ -1,8 +1,8 @@
 """LabLog の起動用（setup.ps1 が、インストール先に LabLog.pyw という名前で置く）。
 
-version.json に書いてある版のフォルダ（versions\\<版>）から LabLog を起動する。
-更新したあとの版が起動の途中で失敗したら、前の版に戻して起動し直す（戻すのは 1 回だけ）。
-どの版の LabLog にも頼らずに動くよう、標準ライブラリだけで書く（lablog/install.py と同じ形を読む）。
+version.json に書いてあるバージョンのフォルダ（versions\\<バージョン>）から LabLog を起動する。
+更新したあとのバージョンが起動の途中で失敗したら、前のバージョンに戻して起動し直す（戻すのは 1 回だけ）。
+どのバージョンの LabLog にも頼らずに動くよう、標準ライブラリだけで書く（lablog/install.py と同じ形を読む）。
 """
 
 import json
@@ -37,7 +37,7 @@ def main():
         tmp = VERSION_FILE.with_name(VERSION_FILE.name + ".tmp")
         tmp.write_text(json.dumps({"current": previous, "previous": None, "failed": current}), encoding="utf-8")
         os.replace(tmp, VERSION_FILE)
-        log(f"前の版（{previous}）に戻して起動し直します")
+        log(f"前のバージョン（{previous}）に戻して起動し直します")
         # このプロセスが二重起動防止の印を持ったままなので、終わるのを待ってから起動してもらう（--after）
         rest = sys.argv[1:]
         args = [a for i, a in enumerate(rest) if a != "--after" and (i == 0 or rest[i - 1] != "--after")]

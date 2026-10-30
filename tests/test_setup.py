@@ -58,12 +58,13 @@ class RecommendedModelTest(unittest.TestCase):
 class FakeOllama(BaseHTTPRequestHandler):
     """Ollama の API のうち、/api/tags と /api/pull（少しずつ進む）だけをまねる。"""
     fail = False
+    models: list = []  # 入っているモデル
 
     def log_message(self, *args):
         pass
 
     def do_GET(self):
-        body = json.dumps({"models": []}).encode()
+        body = json.dumps({"models": [{"name": m} for m in self.models]}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -107,6 +108,19 @@ class OllamaSetupTest(unittest.TestCase):
         self.assertEqual(job["progress"], 1.0)
         cfg = self.settings.get("ollama")
         self.assertEqual((cfg["enabled"], cfg["model"]), (True, "qwen3:4b"))
+
+    def test_downloaded_model_is_recorded(self):
+        self.setup.start(install=False, model="qwen3:4b")
+        self.wait()
+        rec = json.loads((Path(self.tmp.name) / "ai.json").read_text(encoding="utf-8"))
+        self.assertEqual(rec, {"ollama": False, "models": ["qwen3:4b"]})  # アンインストールのときに消すかを聞く
+
+    def test_existing_model_is_not_recorded(self):
+        FakeOllama.models = ["qwen3:4b"]
+        self.addCleanup(setattr, FakeOllama, "models", [])
+        self.setup.start(install=False, model="qwen3:4b")
+        self.wait()
+        self.assertFalse((Path(self.tmp.name) / "ai.json").exists())  # もとからあったモデルは、LabLog が入れたものではない
 
     def test_pull_error_is_reported(self):
         FakeOllama.fail = True

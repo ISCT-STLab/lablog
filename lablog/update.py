@@ -1,8 +1,8 @@
-"""LabLog の更新：GitHub の Releases から新しい版を探し、ダウンロードして切り替える（設定の画面の「更新を確認」）。
+"""LabLog の更新：GitHub の Releases から新しいバージョンを探し、ダウンロードして切り替える（設定の画面の「更新を確認」）。
 
-自動では確認しない。ボタンを押したときだけ GitHub に問い合わせ、送るのは「どの版があるか」を尋ねるリクエストだけ。
-安定版（stable）は正式なリリースだけ、テスト版（beta）はプレリリースも対象にする。
-新しい版は versions\\<版> に展開してから切り替えるので、いま動いている版のファイルは書き換えない（install.py）。
+自動では確認しない。ボタンを押したときだけ GitHub に問い合わせ、送るのは「どのバージョンがあるか」を尋ねるリクエストだけ。
+安定版（stable）は正式なリリースだけ、ベータ版（beta）はプレリリースも対象にする。
+新しいバージョンは versions\\<バージョン> に展開してから切り替えるので、いま動いているバージョンのファイルは書き換えない（install.py）。
 """
 
 import hashlib
@@ -30,7 +30,7 @@ MAX_ZIP_BYTES = 100 * 1024 ** 2
 MAX_UNZIPPED_BYTES = 300 * 1024 ** 2
 TIMEOUT_SEC = 20
 
-# 版の番号：1.2.3（正式）、1.2.3a1・1.2.3b1・1.2.3rc1（テスト版）。先頭の v は無視する
+# バージョン番号：1.2.3（正式）、1.2.3a1・1.2.3b1・1.2.3rc1（ベータ版）。先頭の v は無視する
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$")
 _STAGES = {"a": 0, "b": 1, "rc": 2, None: 3}
 
@@ -44,7 +44,7 @@ def parse_version(text: str) -> tuple | None:
 
 
 def version_key(text: str) -> tuple:
-    """並べ替え用（読めない版は一番古いものとして扱う）。"""
+    """並べ替え用（読めないバージョンは一番古いものとして扱う）。"""
     return parse_version(text) or (-1,)
 
 
@@ -56,7 +56,7 @@ def _get_json(url: str, opener=urllib.request.urlopen):
 
 
 def _release_info(rel: dict) -> dict | None:
-    """GitHub のリリースから、版と ZIP の情報を取り出す（ZIP が無いものは使わない）。"""
+    """GitHub のリリースから、バージョンと ZIP の情報を取り出す（ZIP が無いものは使わない）。"""
     if rel.get("draft"):
         return None
     for asset in rel.get("assets") or []:
@@ -71,7 +71,7 @@ def _release_info(rel: dict) -> dict | None:
 
 
 def latest_release(channel: str, api: str = API, opener=urllib.request.urlopen) -> dict | None:
-    """いちばん新しい版。安定版は正式なリリースだけ、テスト版はプレリリースも含める。"""
+    """いちばん新しいバージョン。安定版は正式なリリースだけ、ベータ版はプレリリースも含める。"""
     releases = _get_json(f"{api}?per_page=20", opener)
     found = [info for info in map(_release_info, releases)
              if info and (channel == "beta" or not info["prerelease"])]
@@ -79,7 +79,7 @@ def latest_release(channel: str, api: str = API, opener=urllib.request.urlopen) 
 
 
 def check(channel: str, api: str = API, opener=urllib.request.urlopen) -> dict:
-    """「更新を確認」：いまの版と、新しい版があればその情報。"""
+    """「更新を確認」：現在のバージョンと、新しいバージョンがあればその情報。"""
     rel = latest_release(channel, api, opener)
     newer = bool(rel) and version_key(rel["version"]) > version_key(__version__)
     return {"current": __version__, "latest": rel, "newer": newer}
@@ -106,7 +106,7 @@ def download(url: str, dest: Path, size: int | None, digest: str | None, progres
 
 
 def extract_release(zip_path: Path, version: str, versions_dir: Path) -> Path:
-    """ZIP の中の LabLog-<版>/ を versions_dir/<版> に展開する。中身がその版のものかも確かめる。"""
+    """ZIP の中の LabLog-<バージョン>/ を versions_dir/<バージョン> に展開する。中身がそのバージョンのものかも確かめる。"""
     top = f"LabLog-{version}/"
     target = versions_dir / version
     tmp = versions_dir / f"{version}.tmp"
@@ -123,7 +123,7 @@ def extract_release(zip_path: Path, version: str, versions_dir: Path) -> Path:
             raise RuntimeError("LabLog の ZIP ではありません")
         init = z.read(f"{top}lablog/__init__.py").decode("utf-8")
         if f'__version__ = "{version}"' not in init:
-            raise RuntimeError("ZIP の中身の版が、リリースの版と合いません")
+            raise RuntimeError("ZIP の中身のバージョンが、リリースのバージョンと合いません")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         for m in members:
@@ -167,7 +167,7 @@ class Updater:
         if not self.installed:
             raise RuntimeError("開発用のフォルダから動いているため、ここからは更新できません（git pull で更新してください）")
         if not parse_version(release.get("version", "")) or not release.get("url"):
-            raise ValueError("更新する版の情報が正しくありません")
+            raise ValueError("更新するバージョンの情報が正しくありません")
         with self._lock:
             if self._job.get("state") in ("running", "restarting"):
                 raise RuntimeError("いま更新を進めています")
@@ -183,12 +183,12 @@ class Updater:
                 size = rel.get("size")
                 download(rel["url"], zip_path, size, rel.get("digest"),
                          lambda done: self._update(progress=done / size if size else None), self.opener)
-                self._update(message="新しい版を展開しています…", progress=None)
+                self._update(message="新しいバージョンを展開しています…", progress=None)
                 extract_release(zip_path, version, self.base / "versions")
             switch_to(self.base, version)
             cleanup_versions(self.base, version_key)
             log.info("LabLog %s に切り替えました。起動し直します", version)
-            self._update(state="restarting", message="新しい版で起動し直しています…")
+            self._update(state="restarting", message="新しいバージョンで起動し直しています…")
             self.restart()
         except Exception as exc:
             log.exception("更新に失敗しました")
