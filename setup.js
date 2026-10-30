@@ -28,6 +28,15 @@ const SETUP_MATERIALS = [
   { key: "ocr", label: "画面の文字", desc: "一部のアプリケーション利用時、画面のスクリーンショットから文字を抽出し、作業内容を推測します。スクリーンショット画像はその場で破棄されます。テキストは日報の作成に利用されたあと、3日で削除されます。" },
 ];
 const SETUP_APPS = [["title", "アプリ名とウィンドウ名"], ["app", "アプリ名だけ"], ["off", "記録しない"]];
+// 作業内容の記録を、まとめて選ぶ（選んだあとも、下の項目を一つずつ変えられる）
+const SETUP_PRESETS = [
+  ["時間だけ", "作業した時間だけを記録します。",
+   { apps: "off", files: false, git: false, chrome: false, edge: false, recent: false, claude: false, ocr: false }],
+  ["基本", "閲覧履歴と画面の文字を除いて記録します。",
+   { apps: "title", files: true, git: true, chrome: false, edge: false, recent: true, claude: true, ocr: false }],
+  ["すべて", "下の項目をすべて記録します。",
+   { apps: "title", files: true, git: true, chrome: true, edge: true, recent: true, claude: true, ocr: true }],
+];
 // 判定方法の選択肢は設定の画面と同じもの（app.js の presenceMethods）
 const SETUP_PLACES = [["home", "自宅"], ["other", "その他"]];
 const SETUP_REMOTE = [
@@ -53,12 +62,13 @@ const SETUP_STEPS = [
 function setupAnswers(s) {
   if (!s.setup_done) {
     return { autoReport: true, ai: false, model: null, apps: null, files: null, git: null, chrome: null, edge: null,
-             recent: null, claude: null, ocr: null, mode: null, remote: null, place: null, cloud: null };
+             recent: null, claude: null, ocr: null, mode: null, remote: null, place: null, cloud: null, reports: true };
   }
   return { autoReport: s.ollama.auto, ai: s.ollama.enabled, model: s.ollama.model,
            apps: s.record.apps, files: s.record.files, git: s.record.git, chrome: s.browsers.chrome, edge: s.browsers.edge,
            recent: s.record.recent_files, claude: s.claude_code.enabled, ocr: s.screen_text.enabled, mode: s.presence.mode,
-           remote: s.presence.remote || "none", place: s.presence.place || "home", cloud: s.cloud.enabled };
+           remote: s.presence.remote || "none", place: s.presence.place || "home", cloud: s.cloud.enabled,
+           reports: s.cloud.reports !== false };
 }
 
 const setupSteps = () => SETUP_STEPS.filter((st) => !st.when || st.when(setupState.a));
@@ -113,6 +123,10 @@ function drawSetupBody() {
 function bindSetupInputs(root, redraw) {
   $$("[data-setup-key]", root).forEach((b) => b.addEventListener("click", () => {
     setupState.a[b.dataset.setupKey] = JSON.parse(b.dataset.value);
+    redraw();
+  }));
+  $$("[data-preset]", root).forEach((b) => b.addEventListener("click", () => {
+    Object.assign(setupState.a, SETUP_PRESETS[Number(b.dataset.preset)][2]);
     redraw();
   }));
   $$("[data-setup-toggle]", root).forEach((input) => input.addEventListener("change", () => {
@@ -237,8 +251,15 @@ function setupRecord(el, a) {
       <div class="setup-item-text"><b>${esc(label)}</b>${desc ? `<span class="help">${esc(desc)}</span>` : ""}</div>
       <div class="seg">${buttons}</div>
     </div>`;
+  const presets = SETUP_PRESETS.map(([label, desc, p], i) => {
+    const on = Object.entries(p).every(([k, v]) => a[k] === v);
+    return `<button type="button" class="choice ${on ? "on" : ""}" data-preset="${i}" aria-pressed="${on}">
+      <b>${esc(label)}</b><span>${esc(desc)}</span></button>`;
+  }).join("");
   el.innerHTML = `
     <p>PC での作業内容を記録できます。${a.autoReport ? "記録をもとに日報が自動作成されます。" : ""}</p>
+    <p class="help">組み合わせを選ぶと、下の項目がまとめて切り替わります。</p>
+    <div class="choices presets">${presets}</div>
     ${row("使ったアプリ", "アプリの名前とウィンドウ名", SETUP_APPS.map(([v, l]) => setupSegment("apps", v, l)).join(""))}
     ${SETUP_MATERIALS.map((m) => row(m.label, m.desc, setupSegment(m.key, true, "記録する") + setupSegment(m.key, false, "しない"))).join("")}`;
 }
@@ -340,6 +361,8 @@ async function setupAccount(el, a) {
       ${setupChoice("cloud", true, "連携する")}
       ${setupChoice("cloud", false, "連携しない")}
     </div>
+    ${a.cloud ? `<div class="switch-list">${setupToggle("reports", "日報もスマホに送る")}</div>
+      <p class="help">日報には、ファイル名などが入ることがあります。</p>` : ""}
     ${a.cloud && url ? `<p class="help">スマホで <a href="${safeHref(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a> を開き、同じアカウントでサインインしてください。</p>` : ""}`;
   bindSetupInputs(el, drawSetupBody);
 }
@@ -364,7 +387,7 @@ function setupDone(el, a) {
       ollama: { ...cur.ollama, auto: a.autoReport, enabled: a.ai, model: a.ai && a.model ? a.model : cur.ollama.model },
       presence: { ...cur.presence, mode: a.mode, remote: a.mode === "activity" ? a.remote : "none",
                   place: a.mode === "off" ? a.place : cur.presence.place },
-      cloud: { ...cur.cloud, enabled: a.cloud },
+      cloud: { ...cur.cloud, enabled: a.cloud, reports: a.reports },
     }, cur.setup_done ? "設定を保存しました" : "記録を始めました");
     if (!ok) { btn.disabled = false; return; }
     setupState.a = null;

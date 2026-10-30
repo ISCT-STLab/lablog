@@ -14,6 +14,7 @@ window.LabLogCloud = (() => {
   const SCOPE = "Files.ReadWrite.AppFolder offline_access";
   const HERE = location.origin + location.pathname;
   const KEY = { token: "lablog.token", login: "lablog.login", silent: "lablog.silent", pending: "lablog.pending",
+                rejected: "lablog.rejected",
                 cache: "lablog.cache:", cacheIndex: "lablog.cache-index", marker: "lablog.marker" };
   const MARKER = { app: "LabLog viewer" }; // PC の LabLog はこの中身の viewer.json を目印に書き出し先を探す
   const CACHE_SEC = 60;
@@ -283,8 +284,17 @@ window.LabLogCloud = (() => {
     state.pendingChecked = Date.now();
     try {
       const names = new Set(await store.list("edits"));
+      // PC が取り込めなかったもの（cloud.py の _reject）：理由を覚えて、お知らせに出す
+      const rejected = list.filter((e) => names.has(e.name.replace(/\.json$/, ".rejected")));
+      for (const e of rejected) {
+        const file = `edits/${e.name.replace(/\.json$/, ".rejected")}`;
+        const info = await store.read(file).catch(() => null);
+        save(KEY.rejected, [...(load(KEY.rejected) || []),
+          { date: e.date, type: e.type, error: (info && info.error) || "PC の LabLog が取り込めませんでした" }]);
+        await store.remove(file).catch(() => {});
+      }
       // PC が取り込んで消し、その後の書き出しも届いたものは外す
-      save(KEY.pending, list.filter((e) => names.has(e.name) || !meta || meta.exported < e.ts));
+      save(KEY.pending, list.filter((e) => !rejected.includes(e) && (names.has(e.name) || !meta || meta.exported < e.ts)));
     } catch { /* 通信できないときは次の機会に */ }
   }
 
@@ -326,7 +336,8 @@ window.LabLogCloud = (() => {
       throw e;
     }
     await checkPending(meta);
-    const base = { today: today(), offline: state.offline, pending: pendingEdits().length };
+    const base = { today: today(), offline: state.offline, pending: pendingEdits().length,
+                   rejected: load(KEY.rejected) || [] };
     if (!meta) return { ...base, state: "none" };
     // app_version：PC の LabLog のバージョン（前のバージョンの PC は書かない）。viewer_version：このビューアーを公開したときのバージョン
     return { ...meta.status, ...base, exported: meta.exported, app_version: meta.app_version || null,
@@ -338,6 +349,7 @@ window.LabLogCloud = (() => {
     await checkPending(meta); // 取り込み済みの修正を、反映待ちの一覧から外す
     const day = data ? structuredClone(data) : emptyDay(date, meta);
     day.is_today = date === today();
+    day.reports_off = !!meta && meta.reports === false; // PC の設定で、日報をスマホに送っていない
     if (meta && meta.exported > day.range[0]) day.now = Math.min(meta.exported, day.range[1]);
     // PC だけで見られる記録（ウィンドウ名・ファイル・閲覧履歴など）はクラウドに無い
     Object.assign(day, { apps: [], files: [], files_total: 0, commits: [], web: [], web_total: 0, recent: [] });
@@ -421,5 +433,7 @@ window.LabLogCloud = (() => {
     mem.clear();
   }
 
-  return { api, ready, signIn: () => signIn(), signOut, clearCache, dev: !!cfg.dev, build: cfg.build || "" };
+  return { api, ready, signIn: () => signIn(), signOut, clearCache, dev: !!cfg.dev, build: cfg.build || "",
+           version: cfg.version || "",
+           dismissRejected: () => save(KEY.rejected, null) };
 })();
