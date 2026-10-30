@@ -281,6 +281,7 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 .choice { display: grid; align-content: start; gap: 4px; padding: 12px 14px; text-align: left; font: inherit; color: var(--ink);
           background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
 .choice:hover { background: var(--surface-2); }
+.choices.presets { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 .choice > span { font-size: calc(12.5px * var(--fs)); color: var(--ink-2); line-height: 1.6; }
 .choice.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; background: var(--accent-soft); }
 .setup-item { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap;

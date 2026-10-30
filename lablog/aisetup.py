@@ -28,6 +28,8 @@ MODELS = [
 WINGET_ID = "Ollama.Ollama"
 # LabLog が入れたもの（Ollama・ダウンロードしたモデル）。設定と同じフォルダに置き、uninstall.ps1 が読んで、消すかを聞く
 AI_RECORD = "ai.json"
+# 始めて、まだ終わっていない準備。LabLog が途中で止まったら（バックアップから戻した・更新した など）、起動したときに続ける
+AI_PENDING = "ai_pending.json"
 INSTALL_TIMEOUT_SEC = 30 * 60
 START_WAIT_SEC = 120
 
@@ -79,6 +81,7 @@ class OllamaSetup:
     def __init__(self, settings):
         self.settings = settings
         self.record_path = Path(settings.path).parent / AI_RECORD
+        self.pending_path = Path(settings.path).parent / AI_PENDING
         self._lock = threading.Lock()
         # state：idle / running / done / error。step：install / start / pull。progress：0〜1（分からなければ None）
         self._job: dict = {"state": "idle"}
@@ -95,7 +98,30 @@ class OllamaSetup:
                 raise RuntimeError("いま準備を進めています。終わるまでお待ちください")
             self._job = {"state": "running", "step": "install" if install else "start",
                          "message": "準備しています…", "progress": None, "model": model}
+        try:
+            self.pending_path.write_text(json.dumps({"install": install, "model": model}), encoding="utf-8")
+        except OSError:
+            pass
+        log.info("ローカル AI の準備を始めました（Ollama のインストール：%s、モデル：%s）",
+                 "する" if install else "しない", model or "なし")
         threading.Thread(target=self._run, args=(install, model), name="ollama-setup", daemon=True).start()
+
+    def resume(self):
+        """前に始めて、終わる前に LabLog が止まった準備を続ける（起動したときに呼ぶ）。"""
+        try:
+            pending = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not self.settings.get("ollama").get("enabled", True):  # そのあと AI を使わないことにした
+            self.pending_path.unlink(missing_ok=True)
+            return
+        model = pending.get("model") if isinstance(pending, dict) else None
+        log.info("止まっていたローカル AI の準備を続けます（%s）", model or "モデルなし")
+        try:
+            self.start(bool(pending.get("install")) and ollama_exe() is None, model)
+        except (ValueError, RuntimeError) as exc:
+            log.warning("止まっていたローカル AI の準備を続けられませんでした（%s）", exc)
+            self.pending_path.unlink(missing_ok=True)
 
     def _update(self, **fields):
         with self._lock:
@@ -121,6 +147,7 @@ class OllamaSetup:
             if model:
                 self._pull(model)
             self._update(state="done", message="準備ができました", progress=1.0)
+            self.pending_path.unlink(missing_ok=True)
             log.info("ローカル AI の準備ができました（%s）", model or "モデルなし")
         except Exception as exc:
             log.exception("ローカル AI の準備に失敗しました")

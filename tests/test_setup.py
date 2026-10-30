@@ -147,6 +147,32 @@ class OllamaSetupTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.setup.start(install=False, model="qwen3:4b")
 
+    def test_resume_after_restart(self):
+        """ダウンロードの途中で LabLog が止まっても（バックアップから戻した など）、次に起動したときに続ける。"""
+        self.settings.update({"ollama": self.settings.get("ollama") | {"enabled": True}})
+        with mock.patch.object(OllamaSetup, "_run"):  # 途中で止まった：終わらない
+            self.setup.start(install=False, model="qwen3:4b")
+        self.assertTrue(self.setup.pending_path.exists())
+        again = OllamaSetup(self.settings)  # 起動し直した
+        again.resume()
+        for _ in range(100):
+            if again.status()["state"] != "running":
+                break
+            time.sleep(0.05)
+        self.assertEqual(again.status()["state"], "done")
+        self.assertFalse(again.pending_path.exists())  # 終わったら覚えておかない
+        again.resume()                                 # 続けるものが無ければ何もしない
+        self.assertEqual(again.status()["state"], "done")
+
+    def test_no_resume_when_ai_turned_off(self):
+        with mock.patch.object(OllamaSetup, "_run"):
+            self.setup.start(install=False, model="qwen3:4b")
+        # setUp の設定は AI を使わない
+        again = OllamaSetup(self.settings)
+        again.resume()
+        self.assertEqual(again.status()["state"], "idle")
+        self.assertFalse(again.pending_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

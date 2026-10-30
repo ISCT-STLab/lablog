@@ -340,6 +340,13 @@ function renderNotices() {
       items.push(["warn", `PC の LabLog が古いバージョン${s.app_version ? `（${esc(s.app_version)}）` : ""}です。PC で更新してください。`]);
     }
   }
+  const job = !cloud && s && s.ai_job;
+  if (job && job.state === "running") {
+    const pct = job.progress == null ? "" : `（${Math.round(job.progress * 100)}%）`;
+    items.push(["", `${esc(job.message || "AI の準備をしています…")}${pct}`]);
+  } else if (job && job.state === "error" && settings && settings.ollama.enabled) {
+    items.push(["error", `AI の準備ができませんでした（${esc(job.message)}）。<a href="#/settings">設定</a> の「日報」からやり直せます。`]);
+  }
   if (!cloud && s && s.update_failed) {
     items.push(["error", `新しいバージョン（${esc(s.update_failed)}）を起動できなかったため、前のバージョン（${esc(s.version)}）に戻しました。`]);
   }
@@ -1365,21 +1372,47 @@ function autoSave(form, build, after) {
 
 // 日報の AI：入っているモデルから選ぶ（選んでいるモデルが無ければ「未ダウンロード」として残す）
 async function loadOllamaState() {
+  clearTimeout(state.ollamaTimer);
   const o = await api.get("/api/ollama", { quiet: true }).catch(() => ({ running: false, models: [] }));
   const f = $("#ollama-form"), el = $("#ollama-state");
   if (!f || !el) return;
   const cur = state.settings.settings.ollama.model;
-  const have = o.models || [];
-  const label = (name) => {
-    const m = (o.catalog || []).find((x) => x.name === name);
-    return `${name}${m ? `（${m.label}）` : ""}${have.includes(name) ? "" : "（未ダウンロード）"}`;
-  };
-  f.model.innerHTML = [...new Set([...have, cur])]
-    .map((n) => `<option value="${esc(n)}" ${n === cur ? "selected" : ""}>${esc(label(n))}</option>`).join("");
-  el.innerHTML = !o.installed ? `<span class="tag warn">Ollama が入っていません</span> 「初期設定をやり直す」から入れられます。`
-    : !o.running ? `<span class="tag warn">Ollama が起動していません</span>`
-    : !o.model_ready ? `<span class="tag warn">モデルがありません</span> 「初期設定をやり直す」からダウンロードできます。`
-    : `<span class="tag">準備完了</span>`;
+  const have = o.models || [], catalog = o.catalog || [];
+  const info = (name) => catalog.find((x) => x.name === name);
+  const label = (name) => `${name}${info(name) ? `（${info(name).label}）` : ""}${have.includes(name) ? "" : "（未ダウンロード）"}`;
+  if (document.activeElement !== f.model) { // 選んでいる最中には作り直さない
+    f.model.innerHTML = [...new Set([...have, ...catalog.map((m) => m.name), cur])]
+      .map((n) => `<option value="${esc(n)}" ${n === cur ? "selected" : ""}>${esc(label(n))}</option>`).join("");
+  }
+  // 準備（インストール・ダウンロード）の進み具合。LabLog が起動し直しても、続きから進める（aisetup.py の resume）
+  const job = o.job || {};
+  const size = info(cur) ? `約 ${info(cur).size_gb} GB` : "";
+  if (job.state === "running") {
+    const pct = job.progress == null ? null : Math.round(job.progress * 100);
+    el.innerHTML = `${esc(job.message || "準備しています…")}${pct == null ? "" : `（${pct}%）`}
+      <div class="progress ${pct == null ? "busy" : ""}"><i style="width:${pct ?? 0}%"></i></div>`;
+    state.ollamaTimer = setTimeout(loadOllamaState, 2000);
+    return;
+  }
+  if (o.installed && o.running && o.model_ready) {
+    el.innerHTML = `<span class="tag">準備完了</span>`;
+    return;
+  }
+  const error = job.state === "error" ? `<span class="tag warn">失敗しました</span> ${esc(job.message)}<br>` : "";
+  const why = !o.installed ? "Ollama が入っていません" : !o.running ? "Ollama が起動していません" : "モデルがありません";
+  const action = !o.installed && !o.winget
+    ? ` <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer">Ollama</a> を入れてください。`
+    : !info(cur) ? ""
+    : ` <button class="btn btn-sm" type="button" id="ollama-start">${!o.installed ? "Ollama とモデルをインストール" : !o.running ? "起動する" : "ダウンロード"}${size ? `（${size}）` : ""}</button>`;
+  el.innerHTML = `${error}<span class="tag warn">${why}</span>${action}`;
+  const start = $("#ollama-start");
+  if (start) start.addEventListener("click", async () => {
+    const onlyStart = o.installed && !o.running; // 起動するだけ（ダウンロードが要るかは、起動してから分かる）
+    if (!onlyStart && !confirm(`${o.installed ? "" : "Ollama（MIT ライセンス）と"}モデル ${cur}（${size}）をインストールします。よろしいですか？`)) return;
+    start.disabled = true;
+    await api.post("/api/ollama/setup", { install: !o.installed, model: cur }).catch((err) => alert(err.message));
+    loadOllamaState();
+  });
 }
 
 async function renderSettings({ keep = false } = {}) {

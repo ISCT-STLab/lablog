@@ -88,7 +88,7 @@ class App:
 
     def status_snapshot(self) -> dict:
         with self._status_lock:
-            return dict(self._status) | {"paused": self._paused}
+            return dict(self._status) | {"paused": self._paused, "ai_job": self.ollama_setup.status()}
 
     def _set_status(self, **fields):
         with self._status_lock:
@@ -343,6 +343,7 @@ class App:
                              (self.report_loop, "report"), (self.cloud.loop, "cloud"),
                              (self.screen_text_loop, "screen-text")):
             threading.Thread(target=target, name=name, daemon=True).start()
+        self.ollama_setup.resume()  # 途中で止まった AI の準備（モデルのダウンロード など）を続ける
         self.queue_report(logical_date(time.time()) - timedelta(days=1), "起動時（前日分が無ければ）")
         log.info("LabLog を起動しました: %s（データ: %s）", self.url, data_dir())
         if open_browser:
