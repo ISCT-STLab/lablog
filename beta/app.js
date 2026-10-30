@@ -1602,6 +1602,8 @@ async function renderSettings({ keep = false } = {}) {
           <a class="btn" href="/api/backup.zip" download>バックアップを保存</a>
           ${restoreButtonHTML()}
         </div>
+        <div class="row" style="margin-top:14px"><span class="spacer"></span>
+          <button class="btn btn-ghost" type="button" id="app-quit">LabLog を終了</button></div>
       </section>
 
       <details class="advanced span-2" id="advanced" ${state.advancedOpen ? "open" : ""}>
@@ -1678,6 +1680,13 @@ async function renderSettings({ keep = false } = {}) {
 
   // ---- そのほかの操作
   $("#update-check").addEventListener("click", () => checkUpdate($("#update-form").channel.value));
+  $("#app-quit").addEventListener("click", async () => {
+    if (!confirm("LabLog を終了します。記録も止まります。よろしいですか？")) return;
+    await api.post("/api/quit").catch(() => {});
+    clearTimeout(state.refreshTimer);
+    view.innerHTML = `<section class="card"><div class="card-head"><h2>LabLog を終了しました</h2></div>
+      <p class="help">もう一度使うときは、スタートメニューの「LabLog」を開いてください。</p></section>`;
+  });
   bindRestore();
   $("#cloud-export").addEventListener("click", async () => {
     const before = await loadCloudState();
