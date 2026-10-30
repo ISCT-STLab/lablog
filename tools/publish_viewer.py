@@ -75,6 +75,11 @@ def push(site: Path, remote: str, message: str):
     if not (site / ".git").exists():
         git(site, "init", "-b", BRANCH)
         git(site, "remote", "add", "origin", remote)
+        # コミットの作者は本体のリポジトリと同じにする（PC 全体の設定にある個人のメールアドレスを公開しないため）
+        for key in ("user.name", "user.email"):
+            value = git(ROOT, "config", key, check=False).stdout.strip()
+            if value:
+                git(site, "config", key, value)
     git(site, "add", "-A")
     if not git(site, "status", "--porcelain").stdout.strip():
         print("変更はありません")
