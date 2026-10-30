@@ -62,12 +62,13 @@ const SETUP_STEPS = [
 function setupAnswers(s) {
   if (!s.setup_done) {
     return { autoReport: true, ai: false, model: null, apps: null, files: null, git: null, chrome: null, edge: null,
-             recent: null, claude: null, ocr: null, mode: null, remote: null, place: null, cloud: null };
+             recent: null, claude: null, ocr: null, mode: null, remote: null, place: null, cloud: null, reports: true };
   }
   return { autoReport: s.ollama.auto, ai: s.ollama.enabled, model: s.ollama.model,
            apps: s.record.apps, files: s.record.files, git: s.record.git, chrome: s.browsers.chrome, edge: s.browsers.edge,
            recent: s.record.recent_files, claude: s.claude_code.enabled, ocr: s.screen_text.enabled, mode: s.presence.mode,
-           remote: s.presence.remote || "none", place: s.presence.place || "home", cloud: s.cloud.enabled };
+           remote: s.presence.remote || "none", place: s.presence.place || "home", cloud: s.cloud.enabled,
+           reports: s.cloud.reports !== false };
 }
 
 const setupSteps = () => SETUP_STEPS.filter((st) => !st.when || st.when(setupState.a));
@@ -360,6 +361,8 @@ async function setupAccount(el, a) {
       ${setupChoice("cloud", true, "連携する")}
       ${setupChoice("cloud", false, "連携しない")}
     </div>
+    ${a.cloud ? `<div class="switch-list">${setupToggle("reports", "日報もスマホに送る")}</div>
+      <p class="help">日報には、ファイル名などが入ることがあります。</p>` : ""}
     ${a.cloud && url ? `<p class="help">スマホで <a href="${safeHref(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a> を開き、同じアカウントでサインインしてください。</p>` : ""}`;
   bindSetupInputs(el, drawSetupBody);
 }
@@ -384,7 +387,7 @@ function setupDone(el, a) {
       ollama: { ...cur.ollama, auto: a.autoReport, enabled: a.ai, model: a.ai && a.model ? a.model : cur.ollama.model },
       presence: { ...cur.presence, mode: a.mode, remote: a.mode === "activity" ? a.remote : "none",
                   place: a.mode === "off" ? a.place : cur.presence.place },
-      cloud: { ...cur.cloud, enabled: a.cloud },
+      cloud: { ...cur.cloud, enabled: a.cloud, reports: a.reports },
     }, cur.setup_done ? "設定を保存しました" : "記録を始めました");
     if (!ok) { btn.disabled = false; return; }
     setupState.a = null;

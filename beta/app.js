@@ -1047,7 +1047,14 @@ function webHTML(day, names) {
 // ---- 日報（ふだんは整形して表示し、「編集」で書き換える）
 
 // 書いて保存していない日報を、日付ごとにこのブラウザに取っておく（閉じたり、再読み込みしたりしても戻せるように）
-const unsavedKey = (date) => `lablog_unsaved_report_${date}`;
+// キーは lablog. で始める（スマホ版でサインアウトすると消える：cloud.js の signOut。ほかのアカウントに残さない）
+const unsavedKey = (date) => `lablog.unsaved:${date}`;
+try { // 前のバージョンのキーから移す
+  Object.keys(localStorage).filter((k) => k.startsWith("lablog_unsaved_report_")).forEach((k) => {
+    localStorage.setItem(unsavedKey(k.slice("lablog_unsaved_report_".length)), localStorage.getItem(k));
+    localStorage.removeItem(k);
+  });
+} catch (e) { /* 保存できないブラウザ */ }
 function keepUnsaved(date, text) {
   try { if (text === null) localStorage.removeItem(unsavedKey(date)); else localStorage.setItem(unsavedKey(date), text); } catch (e) { /* 保存できないブラウザ */ }
 }
@@ -1150,7 +1157,9 @@ function renderReport(day, { editing = false } = {}) {
   const hasKept = kept !== null && kept !== text;
   card.innerHTML = `
     <div class="card-head report-head"><h2>日報</h2><span class="spacer"></span>${buttons}</div>
-    <div class="report-meta" id="report-meta">${!editing && hasKept ? "保存していない内容があります（編集で戻せます）" : reportMeta(r)}</div>
+    <div class="report-meta" id="report-meta">${!editing && hasKept ? `保存していない内容があります
+      <button class="btn btn-sm" type="button" id="report-restore">戻す</button>
+      <button class="btn btn-sm btn-ghost" type="button" id="report-discard">消す</button>` : reportMeta(r)}</div>
     ${body}`;
 
   if (editing) {
@@ -1177,16 +1186,24 @@ function renderReport(day, { editing = false } = {}) {
       renderReport(day);
     });
     save.addEventListener("click", async () => {
+      const sent = ta.value; // 送った内容。返事を待つあいだに書き足しても、保存されるのはここまで
       save.disabled = true;
       try {
-        await api.post("/api/report/save", { date: day.date, text: ta.value });
+        await api.post("/api/report/save", { date: day.date, text: sent });
       } catch (err) {
         alert(err.message);
         save.disabled = false;
         return;
       }
+      day.report = { ...(r || {}), text: sent, edited: 1, saved_ts: Date.now() / 1000, pending: !!cloud };
+      if ($("#report-text") === ta && ta.value !== sent) { // 書き足した分は、未保存のまま残す
+        keepUnsaved(day.date, ta.value);
+        save.disabled = false;
+        $("#report-meta").textContent = "保存しました（そのあとに書いた分は未保存）";
+        flash("日報を保存しました（そのあとに書いた分は未保存です）");
+        return;
+      }
       keepUnsaved(day.date, null);
-      day.report = { ...(r || {}), text: ta.value, edited: 1, saved_ts: Date.now() / 1000, pending: !!cloud };
       renderReport(day);
       flash("日報を保存しました");
     });
@@ -1194,6 +1211,13 @@ function renderReport(day, { editing = false } = {}) {
   }
 
   $("#report-edit").addEventListener("click", () => renderReport(day, { editing: true }));
+  const restore = $("#report-restore"), discard = $("#report-discard");
+  if (restore) restore.addEventListener("click", () => renderReport(day, { editing: true }));
+  if (discard) discard.addEventListener("click", () => {
+    if (!confirm("保存していない内容を消します。よろしいですか？")) return;
+    keepUnsaved(day.date, null);
+    renderReport(day);
+  });
   const gen = $("#report-gen");
   if (gen) gen.addEventListener("click", async () => {
     if (r && r.edited && !confirm("編集した日報を、自動生成した内容で置き換えます。よろしいですか？")) return;
@@ -1554,7 +1578,8 @@ async function renderSettings({ keep = false } = {}) {
         <p class="help">連携すると、入退室履歴をスマホからも確認できます。</p>
         <form id="cloud-form">
           ${toggle("enabled", "連携する", s.cloud.enabled)}
-          <div data-when="enabled">${toggle("reports", "日報もスマホに送る", s.cloud.reports !== false)}</div>
+          <div data-when="enabled">${toggle("reports", "日報もスマホに送る", s.cloud.reports !== false)}
+            <p class="help">日報には、ファイル名などが入ることがあります。</p></div>
           <p class="help" id="cloud-state">${s.cloud.enabled ? "確認中…" : ""}</p>
           <div class="row" data-when="enabled"><span class="spacer"></span><button class="btn" type="button" id="cloud-export">今すぐ同期</button></div>
         </form>
@@ -1918,7 +1943,7 @@ function renderSignIn(error) {
 }
 
 function renderFooter() {
-  $("#foot").innerHTML = `${cloud.build ? `<span>バージョン：${esc(cloud.build)}</span>` : ""}
+  $("#foot").innerHTML = `${cloud.version ? `<span title="${esc(cloud.build ? `公開：${cloud.build}` : "")}">バージョン：${esc(cloud.version)}</span>` : ""}
     ${cloud.dev ? "" : `<button class="btn btn-sm btn-ghost" id="signout">サインアウト</button>`}`;
   const out = $("#signout");
   if (out) out.addEventListener("click", () => {
@@ -1933,7 +1958,10 @@ function renderFooter() {
 let shownHash = location.hash;
 window.addEventListener("hashchange", () => {
   if (location.hash === shownHash) return; // 移るのをやめて、元の画面の URL に戻したとき
-  if (hasUnsaved() && !confirm("保存していない内容があります。移動すると消えます。移動しますか？")) {
+  // 日報の書きかけはこのブラウザに残るが、入退室の編集は残らない
+  const message = $("#stay-form[data-dirty]") ? "入退室の編集を保存していません。移動すると消えます。移動しますか？"
+    : "日報を保存していません（書いた内容は、このブラウザに残ります）。移動しますか？";
+  if (hasUnsaved() && !confirm(message)) {
     location.hash = shownHash;
     return;
   }
