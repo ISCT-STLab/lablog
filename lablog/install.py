@@ -14,10 +14,15 @@ LabLog からは更新しない（git で更新する）。
 import json
 import os
 import shutil
+from datetime import date
 from pathlib import Path
+
+from . import GITHUB_OWNER, GITHUB_REPO
 
 VERSION_FILE = "version.json"
 KEEP_VERSIONS = 3  # 現在のバージョンと前のバージョンのほかに、新しいものから残す数の合計
+# Windows の「インストールされているアプリ」に出すための登録先（HKEY_CURRENT_USER の下。管理者の権限は要らない）
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\LabLog"
 
 
 def install_base(app_dir: Path | None = None) -> Path | None:
@@ -58,3 +63,44 @@ def cleanup_versions(base: Path, sort_key):
     for p in folders:
         if p.name not in keep and p not in newest:
             shutil.rmtree(p, ignore_errors=True)
+
+
+def refresh_uninstaller(base, app_dir: Path | None = None):
+    """インストール先の一番上にあるアンインストールのファイルを、動いているバージョンのものにそろえる。
+    画面から更新したときは versions の下に展開するだけなので、ここで写す（setup.ps1 は一番上に直接写す）。"""
+    app_dir = app_dir or Path(__file__).resolve().parent.parent
+    for name in ("uninstall.cmd", "uninstall.ps1"):
+        src, dst = app_dir / name, Path(base) / name
+        if src.is_file() and (not dst.is_file() or src.read_bytes() != dst.read_bytes()):
+            shutil.copy2(src, dst)
+
+
+def register_app(base, version: str, key: str = UNINSTALL_KEY):
+    """Windows の「インストールされているアプリ」に LabLog を出し、そこからアンインストールできるようにする。
+    setup.ps1 がインストールしたときと、LabLog を起動するたびに呼ぶ（画面から更新したあとも、バージョンの表示が合うように）。"""
+    import winreg
+
+    base = Path(base)
+    refresh_uninstaller(base)  # 前のバージョンの uninstall.ps1 は、下の -Confirmed を受け付けない
+    cmd = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"
+    # Windows の設定で確認が済んでいるので -Confirmed。cmd /c は最初と最後の " を取り除くので、全体をもう一組の " で囲む
+    args = f'-Confirmed -InstallDir "{base}"' + (f' -UninstallKey "{key}"' if key != UNINSTALL_KEY else "")
+    texts = {
+        "DisplayName": "LabLog",
+        "DisplayVersion": version,
+        "Publisher": GITHUB_OWNER,
+        "DisplayIcon": str(Path(__file__).resolve().parent / "web" / "icon.ico"),
+        "InstallLocation": str(base),
+        "UninstallString": f'"{cmd}" /c ""{base / "uninstall.cmd"}" {args}"',
+        "URLInfoAbout": f"https://github.com/{GITHUB_REPO}",
+    }
+    size_kb = sum(p.stat().st_size for p in base.rglob("*") if p.is_file()) // 1024
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+        for name, value in texts.items():
+            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+        for name, value in {"EstimatedSize": size_kb, "NoModify": 1, "NoRepair": 1}.items():
+            winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, value)
+        try:
+            winreg.QueryValueEx(k, "InstallDate")
+        except FileNotFoundError:  # 初めて登録した日を残す
+            winreg.SetValueEx(k, "InstallDate", 0, winreg.REG_SZ, date.today().strftime("%Y%m%d"))

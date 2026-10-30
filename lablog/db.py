@@ -154,11 +154,14 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA secure_delete=ON")  # 消した記録（画面の文字など）の中身を、ファイルにも残さない
     return conn
 
 
 # (バージョン, SQL)。バージョン 2 から順に足していく
-MIGRATIONS: list[tuple[int, str]] = []
+MIGRATIONS: list[tuple[int, str]] = [
+    (2, "ALTER TABLE reports ADD COLUMN saved_ts REAL"),  # 日報を画面で最後に保存した時刻
+]
 SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 1
 KEEP_BACKUPS = 3
 
@@ -180,7 +183,8 @@ def init(conn: sqlite3.Connection):
     pending = [(v, sql) for v, sql in MIGRATIONS if v > version]
     if not pending:
         return
-    backup(conn, f"v{version}")
+    if _has_records(conn):  # 新しく作った（空の）DB は、写しを作らずに新しい形にする
+        backup(conn, f"v{version}")
     for v, sql in pending:
         conn.execute("BEGIN")
         try:
@@ -192,6 +196,11 @@ def init(conn: sqlite3.Connection):
             conn.execute("ROLLBACK")
             raise
         log.info("DB をバージョン %s に移行しました", v)
+
+
+def _has_records(conn) -> bool:
+    return bool(conn.execute("SELECT EXISTS(SELECT 1 FROM stays) OR EXISTS(SELECT 1 FROM segments) "
+                             "OR EXISTS(SELECT 1 FROM reports)").fetchone()[0])
 
 
 def backup(conn: sqlite3.Connection, label: str) -> Path | None:
@@ -228,6 +237,14 @@ def thread_conn() -> sqlite3.Connection:
 def kv_get(conn, key: str, default=None):
     row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+def forget_deleted(conn):
+    """消した記録が、WAL（書き込みの途中のファイル）にも残らないよう、DB 本体へ書き込んで WAL を空にする。"""
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:  # ほかの接続が使っている途中：次に消したときに空にする
+        pass
 
 
 def kv_set(conn, key: str, value):

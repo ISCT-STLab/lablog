@@ -1,6 +1,6 @@
 """LabLog: 研究室の入退室と PC 作業をローカルだけで記録するアプリ。"""
 
-__version__ = "1.0.0b1"
+__version__ = "1.0.0b2"
 
 # 配布元（研究室の GitHub Organization）。更新の確認とブラウザ版の公開に使う。
 GITHUB_OWNER = "ISCT-STLab"

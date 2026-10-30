@@ -21,11 +21,11 @@ from .backup import apply_pending_restore
 from .update import Updater
 from .cloud import CloudSync
 from .collectors import (commit_reminders, discover_repos, import_browser_history, import_claude_code,
-                         import_recent_files, poll_repo)
+                         import_recent_files, poll_repo, track_sources)
 from .config import Settings, dashboard_key, data_dir
 from .days import day_range, fmt_duration, logical_date
 from .filewatch import FileEventSink, WatcherManager
-from .install import install_base, read_versions
+from .install import install_base, read_versions, register_app
 from .presence import Presence, judge_net, work_location
 from .report import generate_report
 from .screentext import ScreenTextRecorder
@@ -52,6 +52,11 @@ class App:
         self._paused = db.kv_get(self.conn, "paused") == "1"
         base = install_base()
         installed = read_versions(base) if base else {}
+        if base:
+            try:  # 画面から更新したあとも、Windows の「インストールされているアプリ」のバージョンが合うように
+                register_app(base, __version__)
+            except OSError as exc:
+                log.warning("「インストールされているアプリ」に登録できませんでした（%s）", exc)
         # update_failed：更新したバージョンを起動できず、ランチャーが前のバージョンに戻したとき（launcher.pyw）
         self._status = {"state": "out", "net": wifi.OFFLINE, "ssids": [], "wifi_error": None,
                         "location": "その他", "idle": 0, "started": time.time(), "version": __version__,
@@ -106,10 +111,22 @@ class App:
         """初回の設定を終えたか。終えるまでは、作業の記録も入退室の判定もしない。"""
         return bool(self.settings.get("setup_done"))
 
+    def _source_states(self) -> dict[str, bool]:
+        """あとからまとめて取り込む材料ごとの、オン・オフ（collectors.track_sources）。"""
+        s = self.settings
+        record = s.get("record")
+        states = {f"browser:{k}": bool(v) for k, v in s.get("browsers").items()}
+        return states | {"recent_files": bool(record.get("recent_files")), "git": bool(record.get("git")),
+                         "claude_code": bool(s.get("claude_code").get("enabled"))}
+
     def settings_changed(self, keys: set[str]):
         if "setup_done" in keys and self.ready() and not db.kv_get(self.conn, "record_since"):
             db.kv_set(self.conn, "record_since", time.time())  # この時刻より前の履歴などは取り込まない
             log.info("初回の設定を終えました。記録を始めます")
+        if self.ready():
+            track_sources(self.conn, self._source_states(), time.time())
+        if "categories" in keys:
+            self.cloud.request_full_export()  # 分類を変えると、前の日の分類別の時間も変わる
         if keys & {"watch_folders", "record", "setup_done"}:
             self.watchers.sync(self._watched_folders())
             self._repos_stale = True
@@ -238,6 +255,7 @@ class App:
                 continue
             now = time.time()
             record = self._record()
+            track_sources(conn, self._source_states(), now)
             jobs = [("ブラウザ履歴", lambda: import_browser_history(conn, s.get("browsers"), now))]
             if record.get("recent_files", True):
                 jobs.append(("最近使ったファイル", lambda: import_recent_files(conn, now)))

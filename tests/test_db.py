@@ -20,45 +20,49 @@ class SchemaTest(unittest.TestCase):
         self.addCleanup(conn.close)
         return conn
 
-    def test_new_db_is_version_1(self):
+    def test_new_db_is_latest(self):
         conn = self.open()
         db.init(conn)
-        self.assertEqual(db.schema_version(conn), 1)
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
+        self.assertFalse((self.path.parent / "backups").exists())  # 空の DB の写しは作らない
 
-    def test_db_before_versioning_becomes_version_1(self):
+    def test_db_before_versioning_is_migrated(self):
         conn = self.open()
-        conn.executescript(db.SCHEMA)  # 版を持つ前の LabLog が作った DB
+        conn.executescript(db.SCHEMA)  # バージョンを持つ前の LabLog が作った DB
         conn.execute("INSERT INTO kv (key, value) VALUES ('paused', '0')")
         db.init(conn)
-        self.assertEqual(db.schema_version(conn), 1)
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
         self.assertEqual(db.kv_get(conn, "paused"), "0")
 
     def test_migration_runs_once_with_backup(self):
         conn = self.open()
         db.init(conn)
-        migrations = [(2, "ALTER TABLE stays ADD COLUMN note TEXT; CREATE TABLE extra (id INTEGER)")]
-        with mock.patch.object(db, "MIGRATIONS", migrations), mock.patch.object(db, "SCHEMA_VERSION", 2):
+        conn.execute("INSERT INTO stays (start_ts, end_ts, status) VALUES (1800000000, 1800003600, 'closed')")
+        now, nxt = db.SCHEMA_VERSION, db.SCHEMA_VERSION + 1
+        migrations = db.MIGRATIONS + [(nxt, "ALTER TABLE stays ADD COLUMN note TEXT; CREATE TABLE extra (id INTEGER)")]
+        with mock.patch.object(db, "MIGRATIONS", migrations), mock.patch.object(db, "SCHEMA_VERSION", nxt):
             db.init(conn)
             db.init(conn)  # 2 回目は何もしない
-        self.assertEqual(db.schema_version(conn), 2)
+        self.assertEqual(db.schema_version(conn), nxt)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(stays)")]
         self.assertIn("note", cols)
-        backups = list((self.path.parent / "backups").glob("lablog-*-v1.db"))
+        backups = list((self.path.parent / "backups").glob(f"lablog-*-v{now}.db"))
         self.assertEqual(len(backups), 1)
         old = sqlite3.connect(backups[0])
         try:
-            self.assertEqual(old.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(old.execute("PRAGMA user_version").fetchone()[0], now)
         finally:
             old.close()
 
     def test_failed_migration_keeps_old_version(self):
         conn = self.open()
         db.init(conn)
-        migrations = [(2, "ALTER TABLE stays ADD COLUMN note TEXT; ALTER TABLE no_such_table ADD COLUMN x")]
-        with mock.patch.object(db, "MIGRATIONS", migrations), mock.patch.object(db, "SCHEMA_VERSION", 2):
+        now, nxt = db.SCHEMA_VERSION, db.SCHEMA_VERSION + 1
+        migrations = db.MIGRATIONS + [(nxt, "ALTER TABLE stays ADD COLUMN note TEXT; ALTER TABLE no_such_table ADD COLUMN x")]
+        with mock.patch.object(db, "MIGRATIONS", migrations), mock.patch.object(db, "SCHEMA_VERSION", nxt):
             with self.assertRaises(sqlite3.OperationalError):
                 db.init(conn)
-        self.assertEqual(db.schema_version(conn), 1)
+        self.assertEqual(db.schema_version(conn), now)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(stays)")]
         self.assertNotIn("note", cols)  # 途中まで適用した分も戻る
 

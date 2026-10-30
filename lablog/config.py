@@ -8,8 +8,10 @@ import copy
 import json
 import logging
 import os
+import re
 import secrets
 import threading
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -116,8 +118,6 @@ DEFAULT_CATEGORIES = [
 # エクスプローラー（ウィンドウ名にフォルダ名が出る）、Git（コミットの記録がある）
 SCREEN_TEXT_APPS = ["claude.exe", "chatgpt.exe", "todo.exe", "ms-teams.exe", "teams.exe", "zoom.exe", "matlab.exe",
                     "windowsterminal.exe", "powershell.exe", "pwsh.exe"]
-# 前のバージョンの初期値。自分で変えていなければ、読み込むときに新しい初期値へ広げる
-OLD_SCREEN_TEXT_APPS = [["claude.exe", "chatgpt.exe"]]
 
 DEFAULT_SETTINGS = {
     # 初回の設定（ダッシュボードの #/setup）を終えたか。終えるまでは何も記録しない（main.py の App.ready）
@@ -145,11 +145,25 @@ DEFAULT_SETTINGS = {
     "claude_code": {"enabled": True},  # Claude Code の会話の題名・作業フォルダ（中身は読まない）
     "screen_text": {"enabled": True, "apps": SCREEN_TEXT_APPS, "interval_min": 5, "keep_days": 3},
     # スマホ用ビューアーへの書き出し（要約だけ）。folder が空なら OneDrive のアプリフォルダを自動で探す。
-    "cloud": {"enabled": True, "folder": "", "viewer_url": ""},
+    # reports：日報もスマホに送る（日報に書かれたファイル名なども、そのままスマホに出る）
+    "cloud": {"enabled": True, "reports": True, "folder": "", "viewer_url": ""},
     # 更新の確認（設定の画面のボタンを押したときだけ）。channel：stable（安定版）/ beta（ベータ版も受け取る）
     "update": {"channel": "stable"},
     "categories": DEFAULT_CATEGORIES,
 }
+
+# 記録や送信をオンにする項目（Settings._load は、設定ファイルに無いものをオフで補う）
+OPT_IN_KEYS = {"record", "browsers", "claude_code", "screen_text", "cloud", "ollama"}
+
+
+def _opted_out(key: str, default: dict) -> dict:
+    """記録・送信の項目の初期値を、すべてオフにしたもの。"""
+    off = {k: False if v is True else v for k, v in default.items()}
+    if key == "record":
+        return off | {"apps": "off"}
+    if key == "cloud":  # 日報は、この項目ができる前から送っていたので、そのまま送る
+        return off | {"reports": True}
+    return off
 
 
 def is_local_url(url: str) -> bool:
@@ -185,11 +199,19 @@ def _git_notify(value):
     return {"enabled": bool(value.get("enabled", True)), "hours": _number(0.5, 24)(value.get("hours", 2))}
 
 
+def is_cloud_model(name: str) -> bool:
+    """Ollama のクラウドモデルか（名前が cloud で終わる。URL が PC 内でも、PC の外で動く）。"""
+    return bool(re.search(r"[:-]cloud$", name.strip().lower()))
+
+
 def _ollama(value):
     url = str(value.get("url", "")).strip()
     if not is_local_url(url):
         raise ValueError("Ollama の URL は PC 内（127.0.0.1 / localhost）だけ指定できます")
-    return {"enabled": bool(value.get("enabled", True)), "url": url, "model": str(value.get("model", "")).strip(),
+    model = str(value.get("model", "")).strip()
+    if is_cloud_model(model):
+        raise ValueError("PC の外で動くモデル（クラウド）は使えません")
+    return {"enabled": bool(value.get("enabled", True)), "url": url, "model": model,
             "auto": bool(value.get("auto", True))}
 
 
@@ -200,8 +222,8 @@ def _cloud(value):
     viewer_url = str(value.get("viewer_url", "")).strip()
     if viewer_url and not viewer_url.startswith("https://"):
         raise ValueError("ビューアーの URL は https:// で始まるものを指定してください")
-    return {"enabled": bool(value.get("enabled", True)), "folder": folder and os.path.normpath(folder),
-            "viewer_url": viewer_url}
+    return {"enabled": bool(value.get("enabled", True)), "reports": bool(value.get("reports", True)),
+            "folder": folder and os.path.normpath(folder), "viewer_url": viewer_url}
 
 
 APP_RECORD_MODES = ("title", "app", "off")
@@ -295,28 +317,36 @@ class Settings:
         self._data = copy.deepcopy(DEFAULT_SETTINGS)
         if self.path.exists():
             try:
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(loaded, dict):
-                    raise ValueError("形が正しくありません")
-            except (OSError, ValueError) as exc:
-                log.warning("settings.json を読めないため、初期値を使います（%s）", exc)
-                loaded = {}
-            # 初回の設定ができる前から使っている人は、設定を済ませたものとみなす
-            loaded.setdefault("setup_done", True)
-            for key, value in loaded.items():
-                if key not in self._data:
-                    continue
-                # 新しいバージョンで増えた項目（wifi の ignore など）は初期値で補う
-                default = self._data[key]
-                value = default | value if isinstance(default, dict) and isinstance(value, dict) else value
-                if key == "screen_text" and isinstance(value, dict) and value.get("apps") in OLD_SCREEN_TEXT_APPS:
-                    value["apps"] = list(SCREEN_TEXT_APPS)
-                # 手で書き換えた値なども、保存するときと同じように確かめる（前のバージョンの判定方法の名前もここで直る）
+                self._load(json.loads(self.path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+                # 壊れた設定から何かを推し量ると、利用者がオフにした記録を始めてしまうことがある。
+                # 退避して、初期設定からやり直してもらう（初期設定を終えるまでは何も記録しない）
+                aside = self.path.with_name(f"settings.broken-{datetime.now():%Y%m%d-%H%M%S}.json")
                 try:
-                    self._data[key] = VALIDATORS[key](value)
-                except (ValueError, TypeError, AttributeError, KeyError):
-                    log.warning("settings.json の %s が正しくないため、初期値を使います", key)
+                    os.replace(self.path, aside)
+                except OSError:
+                    aside = None
+                log.warning("settings.json を読めないため、初期設定からやり直します（%s。前の設定：%s）", exc, aside)
+                self._data = copy.deepcopy(DEFAULT_SETTINGS)
         self.save()
+
+    def _load(self, loaded):
+        if not isinstance(loaded, dict):
+            raise ValueError("形が正しくありません")
+        # 初回の設定ができる前から使っている人は、設定を済ませたものとみなす
+        loaded.setdefault("setup_done", True)
+        data = copy.deepcopy(DEFAULT_SETTINGS)
+        for key, default in DEFAULT_SETTINGS.items():
+            # 記録・送信の項目は、前のバージョンの設定に無いものをオフで補う（選んでいない記録を、更新で始めないように）
+            base = _opted_out(key, default) if key in OPT_IN_KEYS else default
+            if key not in loaded:
+                data[key] = copy.deepcopy(base)
+                continue
+            value = loaded[key]
+            value = base | value if isinstance(base, dict) and isinstance(value, dict) else value
+            # 手で書き換えた値なども、保存するときと同じように確かめる（前のバージョンの判定方法の名前もここで直る）
+            data[key] = VALIDATORS[key](value)
+        self._data = data
 
     def get(self, key, default=None):
         with self._lock:

@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import VIEWER_URL, __version__, db
 from .categorize import Categorizer
-from .config import DAY_START_HOUR
+from .config import DAY_START_HOUR, Settings, data_dir
 from .days import day_range, logical_date, parse_date
 from .presence import delete_stay, save_stay
 from .report import MAX_REPORT_CHARS, save_report
@@ -50,7 +50,7 @@ MIN_TS, MAX_TS = 946_684_800, 4_102_444_800  # 2000〜2100 年
 # クラウドに置く 1 日分の項目（apps・files・web など元の記録に近いものは含めない）
 DAY_KEYS = ("date", "date_label", "range", "now", "stays", "stay_total", "work_total", "work_by_location",
             "categories", "category_names")
-REPORT_KEYS = ("text", "edited", "generated_ts", "source")
+REPORT_KEYS = ("text", "edited", "generated_ts", "source", "saved_ts")
 
 
 def onedrive_root() -> Path | None:
@@ -75,6 +75,20 @@ def onedrive_account() -> str | None:
             return str(winreg.QueryValueEx(key, "UserEmail")[0]) or None
     except OSError:
         return None
+
+
+def machine_id() -> str:
+    """この PC とこの Windows のユーザーの印。記録の DB は別の PC へ移せるので、書き出す PC を見分けるのに使う。"""
+    guid = os.environ.get("COMPUTERNAME", "")
+    if sys.platform == "win32":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0,
+                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                guid = str(winreg.QueryValueEx(key, "MachineGuid")[0])
+        except OSError:
+            pass
+    return hashlib.sha256(f"{guid}|{os.environ.get('USERNAME', '')}".encode()).hexdigest()[:16]
 
 
 def _is_viewer_marker(path: Path) -> bool:
@@ -102,11 +116,11 @@ def find_viewer_folder(root: Path | None = None) -> Path | None:
     return max(found, key=lambda p: (p / MARKER).stat().st_mtime) if found else None
 
 
-def cloud_day(s: dict) -> dict:
-    """1 日分の集計から、クラウドに置いてよい要約だけを取り出す。"""
+def cloud_day(s: dict, reports: bool = True) -> dict:
+    """1 日分の集計から、クラウドに置いてよい要約だけを取り出す。reports：日報も送る（設定の cloud.reports）。"""
     out = {k: s[k] for k in DAY_KEYS}
     out["timeline"] = [{"cat": b["cat"], "start": b["start"], "end": b["end"]} for b in s["timeline"]]
-    out["report"] = {k: s["report"][k] for k in REPORT_KEYS} if s["report"] else None
+    out["report"] = {k: s["report"].get(k) for k in REPORT_KEYS} if reports and s["report"] else None
     return out
 
 
@@ -184,6 +198,12 @@ class CloudSync:
             self._force = True
         self._wake.set()
 
+    def request_full_export(self):
+        """全期間を書き出し直す（分類を変えたとき：前の日の分類別の時間も変わる）。"""
+        with self._lock:
+            self._full = True
+        self._wake.set()
+
     def request_unlink(self):
         """連携の解除（設定でオフにしたとき）。OneDrive 上の記録を消し、スマホ版をサインアウトさせる。"""
         with self._lock:
@@ -200,9 +220,15 @@ class CloudSync:
     def _device(self, conn) -> dict:
         if self.device is None:
             device_id = db.kv_get(conn, "device_id")
+            here, was = machine_id(), db.kv_get(conn, "device_machine")
+            if device_id and was and was != here:  # バックアップを別の PC で戻した：前の PC とは別の PC として書き出す
+                log.info("記録をほかの PC から移したため、この PC の印を作り直します")
+                device_id = None
             if not device_id:
                 device_id = uuid.uuid4().hex
                 db.kv_set(conn, "device_id", device_id)
+            if was != here:
+                db.kv_set(conn, "device_machine", here)
             self.device = {"id": device_id, "name": os.environ.get("COMPUTERNAME") or "PC"}
         return self.device
 
@@ -224,7 +250,7 @@ class CloudSync:
         return {"name": other.get("name") or "別の PC", "exported": exported}
 
     def _cfg(self) -> dict:
-        return {"enabled": True, "folder": "", "viewer_url": ""} | (self.settings.get("cloud") or {})
+        return {"enabled": True, "reports": True, "folder": "", "viewer_url": ""} | (self.settings.get("cloud") or {})
 
     def status(self) -> dict:
         cfg = self._cfg()
@@ -300,14 +326,15 @@ class CloudSync:
         if days or periodic:
             self.export(conn, folder, days, now)
 
-    def unlink(self, conn, now: float):
-        """OneDrive 上の記録（要約・修正・目印）を消して unlinked.json を置く。ほかの PC が書き出していれば何もしない。"""
+    def unlink(self, conn, now: float) -> str | None:
+        """OneDrive 上の記録（要約・修正・目印）を消して unlinked.json を置く。ほかの PC が書き出していれば何もしない。
+        消したら "deleted"、ほかの PC が書き出していれば "other"、書き出し先が無ければ None。"""
         folder = self._resolve_folder(now, force=True)
         if folder is None:
-            return
+            return None
         if self._other_writer(conn, folder, now, takeover=False):
             log.info("ほかの PC が書き出しているため、OneDrive の記録は消しません")
-            return
+            return "other"
         self.import_edits(conn, folder, now)  # スマホで直したまま、まだ取り込んでいない分は先に取り込む
         for name in ("days", "months", "edits"):
             shutil.rmtree(folder / name, ignore_errors=True)
@@ -319,6 +346,7 @@ class CloudSync:
         self.blocked_by = None
         self.last_export = None
         self._written.clear()
+        return "deleted"
 
     def _all_days(self, conn, today: date) -> set[date]:
         row = conn.execute("SELECT MIN(t) AS t FROM (SELECT MIN(start_ts) AS t FROM stays "
@@ -332,20 +360,25 @@ class CloudSync:
 
     def export(self, conn, folder: Path, days: set[date], now: float):
         today = logical_date(now)
+        reports = self._cfg()["reports"]
         for d in sorted(x for x in days if x <= today):
-            s = cloud_day(day_summary(conn, self.settings, d, now))
+            s = cloud_day(day_summary(conn, self.settings, d, now), reports)
             s["now"] = min(now, day_range(d)[1])
             path = folder / "days" / f"{d.isoformat()}.json"
             # 記録の無い日はファイルを作らない（前に書き出していれば、消えたことを反映する）
             if s["stays"] or s["work_total"] or s["report"] or path.exists():
                 self._write(path, s, ignore=("now",))
         for y, m in sorted({(d.year, d.month) for d in days if d <= today}):
-            self._write(folder / "months" / f"{y:04d}-{m:02d}.json", month_summary(conn, self.settings, y, m, now))
+            month = month_summary(conn, self.settings, y, m, now)
+            if not reports:  # 日報を送らないときは、日報がある日の印も送らない
+                for entry in month["days"]:
+                    entry["has_report"] = False
+            self._write(folder / "months" / f"{y:04d}-{m:02d}.json", month)
         status = self.status_fn()
         # app_version：ビューアーが、PC の LabLog が古いことを知らせるため。device：書き出している PC の印
         self._write(folder / "meta.json", {
             "version": FORMAT_VERSION, "app_version": __version__, "device": self._device(conn),
-            "exported": now, "today": today.isoformat(),
+            "exported": now, "today": today.isoformat(), "reports": reports,
             "day_start_hour": DAY_START_HOUR,
             "status": {k: status.get(k) for k in ("state", "since", "location", "paused")},
             "category_names": Categorizer(self.settings.get("categories")).names,
@@ -389,7 +422,7 @@ class CloudSync:
                 try:
                     if now - path.stat().st_mtime > REJECT_AFTER_SEC:
                         log.warning("スマホからの修正ファイルを読めませんでした: %s", path.name)
-                        path.replace(path.with_suffix(".rejected"))
+                        self._reject(path, None, "修正のファイルを読めませんでした")
                 except OSError:
                     pass
         changed: set[date] = set()
@@ -400,5 +433,47 @@ class CloudSync:
                 path.unlink(missing_ok=True)
             except (KeyError, TypeError, ValueError) as exc:
                 log.warning("スマホからの修正を取り込めませんでした（%s）: %s", name, exc)
-                path.replace(path.with_suffix(".rejected"))
+                self._reject(path, edit, str(exc) if isinstance(exc, ValueError) else "修正の内容が正しくありません")
         return changed
+
+    @staticmethod
+    def _reject(path: Path, edit: dict | None, reason: str):
+        """取り込めなかった修正を .rejected に替え、理由を書いておく（スマホ版が読んで、断られたことと理由を出す）。"""
+        try:
+            path.with_suffix(".rejected").write_text(json.dumps({"error": reason, "edit": edit}, ensure_ascii=False),
+                                                     encoding="utf-8")
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+
+def unlink_for_uninstall() -> str:
+    """アンインストールのとき（uninstall.ps1 が、LabLog を止めてから呼ぶ）：連携していれば解除する。画面に出す文を返す。
+
+    設定の画面で連携をオフにしたときと同じく、この PC が書き出した OneDrive の記録を消し、スマホ版をサインアウトさせる。
+    記録を残してアンインストールしたときに、入れ直しても勝手に書き出さないよう、設定の連携もオフにする。
+    """
+    path = data_dir() / "settings.json"
+    if not path.is_file() or not db.db_path().is_file():
+        return ""
+    try:
+        settings = Settings(path)
+        cfg = settings.get("cloud")
+        if not settings.get("setup_done") or not cfg["enabled"]:
+            return ""
+        conn = db.connect()
+        try:
+            db.init(conn)
+            done = CloudSync(settings, dict).unlink(conn, time.time())
+        finally:
+            conn.close()
+        settings.update({"cloud": cfg | {"enabled": False}})
+    except Exception as exc:
+        log.exception("アンインストールのときに連携を解除できませんでした")
+        return f"Microsoft アカウントとの連携を解除できませんでした（{exc}）。スマホ版は、サインアウトしてください。"
+    if done == "other":
+        return "Microsoft アカウントとの連携を解除しました（ほかの PC が書き出しているため、OneDrive の記録はそのままです）"
+    if done == "deleted":
+        return "Microsoft アカウントとの連携を解除しました（OneDrive の LabLog の記録を消し、スマホ版をサインアウトしました）"
+    return "Microsoft アカウントとの連携を解除しました"

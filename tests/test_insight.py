@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from lablog.collectors import import_claude_code
-from lablog.config import Settings
+from lablog.config import SCREEN_TEXT_APPS, Settings
 from lablog.report import build_digest
 from lablog.screentext import tidy_lines
 from lablog.summary import day_summary
@@ -106,19 +106,21 @@ class ScreenTextTest(unittest.TestCase):
         self.assertEqual(part.count("\n- [Claude"), 6)            # 1 日から 6 件だけ
         self.assertTrue(all(len(line) < 330 for line in part.splitlines()))  # 1 件 300 文字まで
 
-    def test_old_default_apps_are_widened_but_custom_lists_kept(self):
+    def test_default_apps(self):
+        apps = SCREEN_TEXT_APPS
+        self.assertIn("matlab.exe", apps)
+        self.assertIn("windowsterminal.exe", apps)
+        self.assertNotIn("chrome.exe", apps)   # 閲覧履歴があるブラウザは読まない
+        self.assertNotIn("code.exe", apps)     # ウィンドウ名にファイル名が出る
+
+    def test_saved_apps_are_not_widened(self):
+        """前のバージョンの初期値のままでも、読み取るアプリを勝手に増やさない。"""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = Path(tmp.name) / "settings.json"
         path.write_text(json.dumps({"screen_text": {"enabled": True, "apps": ["claude.exe", "chatgpt.exe"]}}),
                         encoding="utf-8")
-        apps = Settings(path).get("screen_text")["apps"]
-        self.assertIn("matlab.exe", apps)
-        self.assertIn("windowsterminal.exe", apps)
-        self.assertNotIn("chrome.exe", apps)   # 閲覧履歴があるブラウザは読まない
-        self.assertNotIn("code.exe", apps)     # ウィンドウ名にファイル名が出る
-        path.write_text(json.dumps({"screen_text": {"apps": ["claude.exe"]}}), encoding="utf-8")
-        self.assertEqual(Settings(path).get("screen_text")["apps"], ["claude.exe"])  # 自分で変えた一覧はそのまま
+        self.assertEqual(Settings(path).get("screen_text")["apps"], ["claude.exe", "chatgpt.exe"])
 
 
 if __name__ == "__main__":

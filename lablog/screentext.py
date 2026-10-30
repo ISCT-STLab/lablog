@@ -12,6 +12,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from . import db
 from .winapi import CREATE_NO_WINDOW, capture_window, foreground_handle, window_info
 
 log = logging.getLogger(__name__)
@@ -79,4 +80,5 @@ class ScreenTextRecorder:
         return True
 
     def cleanup(self, now: float, keep_days: float):
-        self.conn.execute("DELETE FROM screen_texts WHERE ts < ?", (now - keep_days * 86400,))
+        if self.conn.execute("DELETE FROM screen_texts WHERE ts < ?", (now - keep_days * 86400,)).rowcount:
+            db.forget_deleted(self.conn)

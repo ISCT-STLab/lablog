@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -88,8 +89,14 @@ class DownloadTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             download("https://example.invalid/1.0.1.zip", self.dest, len(self.data), "sha256:" + "0" * 64,
                      opener=self.opener)
+        digest = "sha256:" + hashlib.sha256(self.data).hexdigest()
         with self.assertRaises(RuntimeError):
-            download("https://example.invalid/1.0.1.zip", self.dest, len(self.data) + 1, None, opener=self.opener)
+            download("https://example.invalid/1.0.1.zip", self.dest, len(self.data) + 1, digest, opener=self.opener)
+
+    def test_without_digest(self):
+        """SHA-256 が付いていないリリースは使わない（ダウンロードしたものが正しいか確かめられない）。"""
+        with self.assertRaises(RuntimeError):
+            download("https://example.invalid/1.0.1.zip", self.dest, len(self.data), None, opener=self.opener)
 
 
 class ExtractTest(unittest.TestCase):
@@ -137,7 +144,8 @@ class UpdaterTest(unittest.TestCase):
     def run_update(self, data: bytes):
         opener = FakeOpener({"https://example.invalid/1.0.1.zip": data})
         up = Updater(self.restarted.set, base=self.base, opener=opener)
-        up.start({"version": "1.0.1", "url": "https://example.invalid/1.0.1.zip", "size": len(data)})
+        up.start({"version": "1.0.1", "url": "https://example.invalid/1.0.1.zip", "size": len(data),
+                  "digest": "sha256:" + hashlib.sha256(data).hexdigest()})
         for _ in range(100):
             if up.status()["state"] not in ("running",):
                 break
@@ -175,6 +183,61 @@ class InstallBaseTest(unittest.TestCase):
             install.write_versions(base, {"current": "1.0.0", "previous": None})
             self.assertEqual(install.install_base(app), base)
             self.assertIsNone(install.install_base(Path(tmp)))  # 開発用のフォルダ
+
+
+class RegisterAppTest(unittest.TestCase):
+    """Windows の「インストールされているアプリ」への登録。本物の登録先ではなく、テスト用のキーに書く。"""
+
+    def setUp(self):
+        import winreg
+        self.winreg = winreg
+        self.key = rf"Software\LabLogTest-{uuid.uuid4().hex}"
+
+        def remove_key():
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, self.key)
+            except FileNotFoundError:  # 登録しないテスト
+                pass
+        self.addCleanup(remove_key)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name) / "Programs" / "Lab Log"  # 空白を含むパスでも
+        (self.base / "versions" / "1.0.0").mkdir(parents=True)
+        (self.base / "uninstall.cmd").write_text("@echo off", encoding="utf-8")
+
+    def value(self, name):
+        with self.winreg.OpenKey(self.winreg.HKEY_CURRENT_USER, self.key) as k:
+            return self.winreg.QueryValueEx(k, name)[0]
+
+    def test_register_and_update_version(self):
+        install.register_app(self.base, "1.0.0", self.key)
+        self.assertEqual(self.value("DisplayName"), "LabLog")
+        self.assertEqual(self.value("DisplayVersion"), "1.0.0")
+        self.assertEqual(self.value("InstallLocation"), str(self.base))
+        self.assertEqual(self.value("NoModify"), 1)
+        self.assertTrue(Path(self.value("DisplayIcon")).is_file())
+        cmd = self.value("UninstallString")
+        self.assertTrue(cmd.startswith('"') and ' /c ""' in cmd and cmd.endswith('"'))
+        self.assertIn(f'"{self.base / "uninstall.cmd"}" -Confirmed -InstallDir "{self.base}"', cmd)
+        self.assertIn(f'-UninstallKey "{self.key}"', cmd)  # テスト用のキーなら、アンインストールにも渡す
+        # 更新したあとに起動すると、バージョンだけ変わり、インストールした日はそのまま
+        with self.winreg.OpenKey(self.winreg.HKEY_CURRENT_USER, self.key, 0, self.winreg.KEY_SET_VALUE) as k:
+            self.winreg.SetValueEx(k, "InstallDate", 0, self.winreg.REG_SZ, "20260101")
+        install.register_app(self.base, "1.1.0", self.key)
+        self.assertEqual(self.value("DisplayVersion"), "1.1.0")
+        self.assertEqual(self.value("InstallDate"), "20260101")
+
+    def test_refresh_uninstaller_after_update(self):
+        """画面から更新したあと：一番上の uninstall.ps1 が前のバージョンのままなら、動いているバージョンのものに替える。"""
+        app = self.base / "versions" / "1.1.0"
+        app.mkdir()
+        (app / "uninstall.ps1").write_text("# new", encoding="utf-8")
+        (self.base / "uninstall.ps1").write_text("# old", encoding="utf-8")
+        install.refresh_uninstaller(self.base, app)
+        self.assertEqual((self.base / "uninstall.ps1").read_text(encoding="utf-8"), "# new")
+        self.assertEqual((self.base / "uninstall.cmd").read_text(encoding="utf-8"), "@echo off")  # 無いものはそのまま
+        install.refresh_uninstaller(self.base, self.base / "versions" / "1.0.0")  # setup で入れた形（versions に無い）
+        self.assertEqual((self.base / "uninstall.ps1").read_text(encoding="utf-8"), "# new")
 
 
 if __name__ == "__main__":

@@ -1,14 +1,16 @@
 ﻿# LabLog をこの PC に入れる（管理者の権限は要らない）。ZIP を展開したフォルダの setup.cmd から実行する。
 #   1. Python 3.11 以降があるか確かめる（無ければ winget で入れるかを聞く）
 #   2. %LOCALAPPDATA%\Programs\LabLog\versions\<バージョン> にアプリを写し、起動用の LabLog.pyw と version.json を置く
-#   3. スタートメニューとスタートアップにショートカットを作る（ログオンしたときに自動で起動する）
+#   3. スタートメニューとスタートアップにショートカットを作る（ログオンしたときに自動で起動する）。
+#      Windows の「インストールされているアプリ」にも出す（そこからアンインストールできる）
 #   4. LabLog を起動する（初めてなら初期設定の画面が開く）
 # すでに入っていれば、新しいバージョンに入れ替える。記録と設定は %LOCALAPPDATA%\LabLog にあり、そのまま引き継ぐ。
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\LabLog"),
     [string]$ShortcutDir = "",  # テスト用：ショートカットを作るフォルダ（空ならスタートメニューとスタートアップ）
     [switch]$NoStart,           # テスト用：最後に LabLog を起動しない
-    [switch]$Yes                # テスト用：確認を出さずに進める
+    [switch]$Yes,               # テスト用：確認を出さずに進める
+    [string]$UninstallKey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabLog"  # テスト用：「インストールされているアプリ」の登録先（HKCU の下）
 )
 $ErrorActionPreference = "Stop"
 $src = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -113,6 +115,10 @@ $json = @{ current = $version; previous = $previous } | ConvertTo-Json -Compress
 Get-ChildItem $versions -Directory | Where-Object { $_.Name -ne $version -and $_.Name -ne $previous } |
     Remove-Item -Recurse -Force
 
+# Windows の「インストールされているアプリ」に出す（lablog/install.py。LabLog も起動するたびに登録し直す）
+& $found.Python -c "import sys; sys.path.insert(0, sys.argv[1]); from lablog.install import register_app; register_app(*sys.argv[2:])" $dest $InstallDir $version $UninstallKey
+if ($LASTEXITCODE -ne 0) { Write-Host "「インストールされているアプリ」に登録できませんでした。アンインストールは uninstall.cmd でできます。" }
+
 # ショートカット：ログオン時はブラウザを開かずに裏で起動、スタートメニューからはダッシュボードを開く
 $launcher = Join-Path $InstallDir "LabLog.pyw"
 $shell = New-Object -ComObject WScript.Shell
@@ -141,4 +147,5 @@ if (-not $NoStart) {
 Write-Host "インストールしました：LabLog $version"
 Write-Host "  スタートメニュー：$menu"
 Write-Host "  自動起動：$startup"
-Write-Host "  アンインストール：$InstallDir\uninstall.cmd"
+Write-Host "  アンインストール：Windows の設定 → アプリ → インストールされているアプリ（または $InstallDir\uninstall.cmd）"
+Write-Host "展開したフォルダは、もう消してかまいません。"

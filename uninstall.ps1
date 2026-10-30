@@ -1,30 +1,58 @@
-﻿# LabLog をこの PC から外す（setup.ps1 で入れたもの）。日報の AI（Ollama）と、記録したデータも消すかどうかは聞く（初めは残す）。
+﻿# LabLog をアンインストールする（setup.ps1 でインストールしたもの）。日報の AI（Ollama）と、記録したデータも消すかどうかは聞く（初めは残す）。
+# Windows の「インストールされているアプリ」からも、これが動く（lablog/install.py が登録する）
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\LabLog"),
     [string]$ShortcutDir = "",  # テスト用：ショートカットのあるフォルダ（空ならスタートメニューとスタートアップ）
-    [switch]$Yes,               # テスト用：アプリを外すかの確認を出さない（AI と記録は消さない）
+    [switch]$Yes,               # テスト用：アンインストールするかの確認を出さない（AI と記録は消さない）
+    [switch]$Confirmed,         # Windows の設定から動いたとき：アンインストールするかの確認は、設定の画面で済んでいる
     [switch]$DeleteAI,          # 日報の AI も確認なしで消す
     [switch]$DeleteData,        # 記録したデータも確認なしで消す
     [string]$DataDir = (Join-Path $env:LOCALAPPDATA "LabLog"),               # テスト用：記録したデータの場所
     [string]$OllamaDir = (Join-Path $env:LOCALAPPDATA "Programs\Ollama"),   # テスト用：Ollama の場所
     [string]$OllamaHome = (Join-Path $env:USERPROFILE ".ollama"),            # テスト用：Ollama のモデルなどの場所
-    [string]$BackupTo = ""      # テスト用：記録を消す前のバックアップの保存先（指定すると確認なしで保存する）
+    [string]$BackupTo = "",     # テスト用：記録を消す前のバックアップの保存先（指定すると確認なしで保存する）
+    [string]$UninstallKey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabLog"  # テスト用：「インストールされているアプリ」の登録先（HKCU の下）
 )
 $ErrorActionPreference = "Stop"
 Set-Location $env:TEMP  # インストール先のフォルダを消せるように、そこから離れておく
 $data = $DataDir
 
-if (-not $Yes -and (Read-Host "LabLog をこの PC から外しますか？ [Y/N]") -notmatch '^[Yy]') { return }
+if (-not $Yes -and -not $Confirmed -and (Read-Host "LabLog をアンインストールしますか？ [Y/N]") -notmatch '^[Yy]') { return }
 
 # このインストール先から動いている LabLog を止め、終わるまで待つ（止まりきる前に消すと、使用中で消せない）。
 # Python の名前は入れ方で違う（pythonw.exe・pythonw3.13.exe など）。パスの大文字・小文字は区別しない
 $running = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" |
     Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($InstallDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+$pythonw = @($running | Where-Object { $_.ExecutablePath } | ForEach-Object { $_.ExecutablePath }) | Select-Object -First 1
 foreach ($p in $running) {
     Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     Write-Host "LabLog を終了しました（PID $($p.ProcessId)）"
 }
 foreach ($p in $running) { Wait-Process -Id $p.ProcessId -Timeout 15 -ErrorAction SilentlyContinue }
+
+# ---- Microsoft アカウントとの連携を解除する（lablog/cloud.py の unlink_for_uninstall）
+# この PC が書き出した OneDrive の記録を消し、スマホ版をサインアウトさせる（ほかの PC が書き出していれば消さない）。
+# 使う Python は、動いていた LabLog と同じもの（動いていなければショートカットから探す）
+$shell = New-Object -ComObject WScript.Shell
+$dirs = if ($ShortcutDir) { @($ShortcutDir) } else {
+    @([Environment]::GetFolderPath("Startup"), [Environment]::GetFolderPath("Programs"))
+}
+if (-not $pythonw) {
+    $pythonw = $dirs | ForEach-Object { Get-ChildItem $_ -Filter "LabLog*.lnk" -ErrorAction SilentlyContinue } |
+        ForEach-Object { $shell.CreateShortcut($_.FullName) } | Where-Object { $_.Arguments.Contains($InstallDir) } |
+        ForEach-Object { $_.TargetPath } | Select-Object -First 1
+}
+$current = $null
+try { $current = ([IO.File]::ReadAllText((Join-Path $InstallDir "version.json")) | ConvertFrom-Json).current } catch {}
+$app = if ($current) { Join-Path $InstallDir "versions\$current" } else { $null }
+if ($app -and (Test-Path $app) -and $pythonw -and (Test-Path $pythonw) -and (Test-Path (Join-Path $data "settings.json"))) {
+    $python = Join-Path (Split-Path $pythonw) "python.exe"
+    if (-not (Test-Path $python)) { $python = $pythonw }
+    # テスト用の記録の場所なら、本物の OneDrive のフォルダは探さない（lablog/cloud.py の _resolve_folder）
+    if ($data -ne (Join-Path $env:LOCALAPPDATA "LabLog")) { $env:LABLOG_DATA_DIR = $data }
+    & $python -c "import sys; sys.path.insert(0, sys.argv[1]); from lablog.cloud import unlink_for_uninstall; print(unlink_for_uninstall())" $app
+    Remove-Item Env:LABLOG_DATA_DIR -ErrorAction SilentlyContinue
+}
 
 # フォルダを消す。使用中のことがあるので何度か試す。
 # keep のファイル（アンインストールのファイル）は、フォルダごと消せると分かってから消す（消せなかったときに、もう一度実行できるように）。
@@ -46,10 +74,6 @@ function Remove-Folder($path, $keep = @()) {
 }
 
 # このインストール先を起動するショートカットだけを消す（開発用に別の場所から動かしているものは残す）
-$shell = New-Object -ComObject WScript.Shell
-$dirs = if ($ShortcutDir) { @($ShortcutDir) } else {
-    @([Environment]::GetFolderPath("Startup"), [Environment]::GetFolderPath("Programs"))
-}
 foreach ($dir in $dirs) {
     Get-ChildItem $dir -Filter "LabLog*.lnk" -ErrorAction SilentlyContinue | ForEach-Object {
         if ($shell.CreateShortcut($_.FullName).Arguments.Contains($InstallDir)) {
@@ -67,6 +91,11 @@ if (Test-Path $InstallDir) {
     }
     Write-Host "削除しました：$InstallDir"
 }
+
+# Windows の「インストールされているアプリ」から消す（このインストール先を登録したものだけ）
+$reg = "HKCU:\$UninstallKey"
+$entry = Get-ItemProperty $reg -ErrorAction SilentlyContinue
+if ($entry -and $entry.InstallLocation -eq $InstallDir) { Remove-Item $reg -Recurse -Force }
 
 # ---- 日報の AI（Ollama）
 # LabLog が入れたもの（Ollama・ダウンロードしたモデル）は ai.json にある（lablog/aisetup.py）。
@@ -122,7 +151,7 @@ if (Test-Path $data) {
         if ($save) {
             $dest = if ($BackupTo) { $BackupTo } else {
                 Join-Path ([Environment]::GetFolderPath("Desktop")) "LabLog-backup-$(Get-Date -Format yyyyMMdd-HHmm).zip" }
-            $items = @("lablog.db", "lablog.db-wal", "settings.json", "ai.json") | ForEach-Object { Join-Path $data $_ } |
+            $items = @("lablog.db", "lablog.db-wal", "settings.json") | ForEach-Object { Join-Path $data $_ } |
                 Where-Object { Test-Path $_ }
             Compress-Archive -Path $items -DestinationPath $dest -Force
             Write-Host "バックアップを保存しました：$dest"
@@ -136,4 +165,4 @@ if (Test-Path $data) {
         Write-Host "記録したデータは残してあります：$data"
     }
 }
-Write-Host "LabLog を外しました"
+Write-Host "LabLog をアンインストールしました"

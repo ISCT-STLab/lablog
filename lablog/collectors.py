@@ -38,6 +38,26 @@ def first_since(conn, now: float) -> float:
     return max(day_range(logical_date(now))[0], float(kv_get(conn, "record_since", 0) or 0))
 
 
+def track_sources(conn, states: dict[str, bool], now: float):
+    """記録の材料（ブラウザ・Git など）ごとに、オフからオンにした時刻を覚える（設定を変えたときと、取り込みの前に呼ぶ）。
+
+    取り込みは前回読んだ位置から続きを読むので、覚えておかないと、オフにしていたあいだの分までオンに戻したときに取り込む。
+    """
+    for name, on in states.items():
+        prev = kv_get(conn, f"source:{name}")
+        if on and prev != "on":
+            kv_set(conn, f"source:{name}", "on")
+            if prev == "off":
+                kv_set(conn, f"source:{name}:since", now)
+        elif not on and prev != "off":
+            kv_set(conn, f"source:{name}", "off")
+
+
+def enabled_since(conn, name: str) -> float:
+    """この材料を最後にオンにした時刻。これより前の分は取り込まない（オフにしていた期間）。"""
+    return float(kv_get(conn, f"source:{name}:since", 0) or 0)
+
+
 def _strip_dashboard_key(url: str, parsed) -> str:
     """LabLog がダッシュボードを開いた URL（?key=合言葉）から、合言葉を消す。"""
     if parsed.hostname not in LOCAL_HOSTS or "key=" not in parsed.query:
@@ -76,7 +96,8 @@ def _import_profile(conn, key, label, profile, src: Path, tmp_dir: Path, now: fl
     copy = tmp_dir / f"history_{key}_{profile.replace(' ', '_')}.sqlite"
     shutil.copyfile(src, copy)  # ブラウザが開いていても読めるようにコピーしてから読む
     last_id = int(kv_get(conn, state_key + ":last_id", -1))
-    since = first_since(conn, now)  # 初回は今日（朝 5 時以降）の分だけ取り込む
+    floor = enabled_since(conn, f"browser:{key}")
+    since = max(first_since(conn, now), floor)  # 初回は今日（朝 5 時以降）の分だけ取り込む
     src_conn = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
     try:
         max_id = src_conn.execute("SELECT MAX(id) FROM visits").fetchone()[0] or 0
@@ -109,9 +130,9 @@ def _import_profile(conn, key, label, profile, src: Path, tmp_dir: Path, now: fl
         if core in (3, 4) or (redirect and not transition & 0x20000000):
             continue  # 埋め込みフレームや、途中で転送されたページ
         parsed = urlparse(url)
-        if parsed.scheme in SKIP_SCHEMES or in_ranges(ts, pauses):
+        if parsed.scheme in SKIP_SCHEMES or ts < floor or in_ranges(ts, pauses):
             continue
-        domain = (parsed.hostname or ("file" if parsed.scheme == "file" else "")).removeprefix("www.")
+        domain =(parsed.hostname or ("file" if parsed.scheme == "file" else "")).removeprefix("www.")
         batch.append((ts, label, profile, visit_id, _strip_dashboard_key(url, parsed), title or "", domain))
     if batch:
         conn.executemany("INSERT OR IGNORE INTO web_visits (ts, browser, profile, visit_id, url, title, domain) "
@@ -143,7 +164,9 @@ def import_claude_code(conn, now: float, root: Path | None = None):
     if not root.is_dir():
         return
     since = first_since(conn, now)
+    floor = enabled_since(conn, "claude_code")
     pauses = paused_ranges(conn, 0, now, now)
+    paused_now = conn.execute("SELECT 1 FROM pauses WHERE end_ts IS NULL").fetchone() is not None
     for path in root.glob("*/*.jsonl"):
         key = f"claude:{path}"
         size = path.stat().st_size
@@ -159,25 +182,44 @@ def import_claude_code(conn, now: float, root: Path | None = None):
         end = chunk.rfind(b"\n") + 1  # 書きかけの最後の行は次回に回す
         if not end:
             continue
-        sessions: dict[str, dict] = {}
-        minutes: set[tuple[str, float]] = set()
+        lines = []
         for raw in chunk[:end].splitlines():
             try:
                 line = json.loads(raw)
             except ValueError:
                 continue
-            sid = line.get("sessionId") if isinstance(line, dict) else None
-            if not isinstance(sid, str):
-                continue
+            if isinstance(line, dict) and isinstance(line.get("sessionId"), str):
+                lines.append(line)
+        stamps = [_iso_ts(line.get("timestamp")) for line in lines]
+        # 題名の変更の行には時刻が無いので、前（無ければ後）の行の時刻で、記録してよい時間に付けたものかを決める
+        near, prev = [], None
+        for ts in stamps:
+            prev = ts if ts is not None else prev
+            near.append(prev)
+        nxt = None
+        for i in range(len(stamps) - 1, -1, -1):
+            nxt = stamps[i] if stamps[i] is not None else nxt
+            near[i] = near[i] if near[i] is not None else nxt
+
+        def allowed(ts):  # 初回の設定より前・オフにしていた期間・一時停止中の分は取り込まない
+            if ts is None:  # 前後のどの行にも時刻が無い：いま書かれたものとみなす
+                return not paused_now and now >= floor
+            return not (first and ts < since) and ts >= floor and not in_ranges(ts, pauses)
+
+        sessions: dict[str, dict] = {}
+        minutes: set[tuple[str, float]] = set()
+        for line, ts, ref in zip(lines, stamps, near):
+            sid = line["sessionId"]
             s = sessions.setdefault(sid, {"title": None, "folder": None, "first": None, "last": None})
             kind = line.get("type")
+            if kind in ("custom-title", "agent-name") and not allowed(ref):
+                continue
             if kind == "custom-title" and isinstance(line.get("customTitle"), str):
                 s["title"] = line["customTitle"].strip()[:100] or s["title"]
             elif kind == "agent-name" and isinstance(line.get("agentName"), str) and not s["title"]:
                 s["title"] = line["agentName"].strip()[:100] or None
             elif kind in CLAUDE_ACTIVITY:
-                ts = _iso_ts(line.get("timestamp"))
-                if ts is None or (first and ts < since) or in_ranges(ts, pauses):
+                if ts is None or not allowed(ts):
                     continue
                 minutes.add((sid, ts // 60 * 60))
                 if isinstance(line.get("cwd"), str):
@@ -223,6 +265,8 @@ def _lnk_target(path: Path) -> str | None:
     def read_unicode(off):
         end = off
         while data[end:end + 2] != b"\x00\x00":
+            if end + 2 > len(data):  # 終わりの印が無い壊れたファイル（読み続けて止まらないように）
+                raise ValueError("文字列の終わりがありません")
             end += 2
         return data[off:end].decode("utf-16-le", errors="replace")
 
@@ -243,7 +287,7 @@ def import_recent_files(conn, now: float):
     recent = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Recent"
     if not recent.is_dir():
         return
-    last = float(kv_get(conn, "recent:last_mtime", first_since(conn, now)))
+    last = max(float(kv_get(conn, "recent:last_mtime", first_since(conn, now))), enabled_since(conn, "recent_files"))
     pauses = paused_ranges(conn, last, now, now)
     newest = last
     batch = []
@@ -294,7 +338,9 @@ def discover_repos(folders: list[str], max_depth: int = 4) -> list[str]:
 
 def poll_repo(conn, repo: str, now: float):
     state = conn.execute("SELECT * FROM repo_state WHERE repo = ?", (repo,)).fetchone()
-    since_ts = float(kv_get(conn, f"git:{repo}:since", first_since(conn, now)))
+    floor = enabled_since(conn, "git")
+    since_ts = max(float(kv_get(conn, f"git:{repo}:since", first_since(conn, now))), floor)
+    pauses = paused_ranges(conn, since_ts - 60, now, now)
     email = _git(repo, "config", "user.email", timeout=10).stdout.strip()
     args = ["log", "--all", f"--since={datetime.fromtimestamp(since_ts - 60).isoformat(timespec='seconds')}",
             "--format=%H%x1f%ct%x1f%ae%x1f%s"]
@@ -306,7 +352,10 @@ def poll_repo(conn, repo: str, now: float):
         for line in result.stdout.splitlines():
             parts = line.split("\x1f")
             if len(parts) == 4:
-                rows.append((repo, parts[0], float(parts[1]), parts[2], parts[3]))
+                ts = float(parts[1])
+                if ts < floor or in_ranges(ts, pauses):  # オフにしていた期間・一時停止中のコミットは取り込まない
+                    continue
+                rows.append((repo, parts[0], ts, parts[2], parts[3]))
         if rows:
             conn.executemany("INSERT OR IGNORE INTO commits (repo, hash, ts, author, subject) "
                              "VALUES (?, ?, ?, ?, ?)", rows)

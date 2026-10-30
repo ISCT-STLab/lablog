@@ -258,22 +258,40 @@ const presenceMethods = [
   ["off", "記録しない", "PC作業時間だけを記録します。"],
 ];
 
+// いま記録しているもの（ヘッダーの「記録中」に添える）
+function recordingItems() {
+  const st = state.settings && state.settings.settings;
+  if (!st) return [];
+  const r = st.record || {};
+  const items = [];
+  if (presenceMode() !== "off") items.push("入退室");
+  if (r.apps === "title") items.push("アプリとウィンドウ名");
+  else if (r.apps === "app") items.push("アプリ名");
+  if (r.files) items.push("ファイル");
+  if (r.git) items.push("Git");
+  if (r.recent_files) items.push("最近使ったファイル");
+  if (Object.values(st.browsers || {}).some(Boolean)) items.push("閲覧履歴");
+  if (st.claude_code && st.claude_code.enabled) items.push("Claude Code");
+  if (st.screen_text && st.screen_text.enabled) items.push("画面の文字");
+  if (st.cloud && st.cloud.enabled) items.push("スマホ版へ送信");
+  return items;
+}
+
 function renderStatus() {
   const s = state.status;
   if (!s) return;
   if (cloud) return renderCloudStatus(s);
-  const parts = [];
-  if (s.paused) {
-    parts.push(`<span class="pill paused"><span class="dot"></span>記録を一時停止中</span>`);
-  }
-  $("#status").innerHTML = parts.join("");
+  const ready = !(state.settings && state.settings.settings.setup_done === false); // 初期設定の前は何も記録しない
+  $("#status").innerHTML = !ready ? ""
+    : s.paused ? `<span class="pill paused" title="作業内容の記録を止めています。入退室の判定は続けます。"><span class="dot"></span>一時停止中</span>`
+    : `<span class="pill rec" title="${esc(`記録しているもの：${recordingItems().join("・") || "なし"}`)}"><span class="dot"></span>記録中</span>`;
   const info = $("#presence-info");
   if (info) info.innerHTML = presenceInfoHTML();
   const btn = $("#pause");
-  const label = s.paused ? "記録を再開" : "記録を一時停止";
-  btn.innerHTML = s.paused ? ICON_PLAY : ICON_STOP;
-  btn.setAttribute("aria-label", label);
-  btn.title = label;
+  const label = s.paused ? "再開" : "一時停止";
+  btn.innerHTML = `${s.paused ? ICON_PLAY : ICON_STOP}<span class="btn-label">${label}</span>`;
+  btn.setAttribute("aria-label", s.paused ? "記録を再開" : "記録を一時停止");
+  btn.title = s.paused ? "記録を再開" : "記録を一時停止";
   btn.classList.toggle("btn-primary", !!s.paused);
   renderNotices();
 }
@@ -313,6 +331,11 @@ function renderNotices() {
     if (s.state === "none") items.push(["warn", "PC から記録が届いていません。"]);
     if (s.offline) items.push(["warn", "インターネットにつながらないため、前に読み込んだ内容を表示しています。"]);
     if (s.pending) items.push(["warn", `修正（${s.pending} 件）は、PC の LabLog が次に動いたときに反映されます。`]);
+    for (const r of s.rejected || []) { // PC が取り込めなかった修正（cloud.js の checkPending）
+      const what = r.type === "report" ? "日報" : "入退室";
+      items.push(["error", `${esc(String(r.date).slice(5).replace("-", "/"))}の${what}の修正を、PC が取り込めませんでした（${esc(r.error)}）。
+        <a href="#/day/${esc(r.date)}">もう一度直す</a> <button class="btn btn-sm btn-ghost" type="button" data-dismiss-rejected>閉じる</button>`]);
+    }
     if (s.state !== "none" && s.viewer_version && versionLess(s.app_version, s.viewer_version)) {
       items.push(["warn", `PC の LabLog が古いバージョン${s.app_version ? `（${esc(s.app_version)}）` : ""}です。PC で更新してください。`]);
     }
@@ -332,6 +355,11 @@ function renderNotices() {
   }
   $("#notices").innerHTML = items.map(([kind, html]) =>
     `<div class="notice ${kind}"><span class="ico">!</span><div>${html}</div></div>`).join("");
+  $$("[data-dismiss-rejected]").forEach((b) => b.addEventListener("click", () => {
+    cloud.dismissRejected();
+    state.status.rejected = [];
+    renderNotices();
+  }));
 }
 
 // バージョン番号を比べる（update.py の parse_version と同じ形：1.2.3、ベータ版は 1.2.3b1 など）。a が分からなければ古いとみなす
@@ -548,8 +576,12 @@ const currentPage = () => {
   return ["month", "settings", "setup"].includes(page) ? page : "day";
 };
 
+// 保存していない入力（日報・入退室の編集）があるか。画面を移るときと、閉じる・再読み込みのときに確かめる
+const hasUnsaved = () => (state.reportEditing && state.reportDirty) || !!$("#stay-form[data-dirty]");
+
 async function route() {
   clearTimeout(state.refreshTimer);
+  state.reportEditing = state.reportDirty = false; // 画面を描き直すので、書きかけの状態も終わる
   state.tips = [];
   tip.hidden = true;
   const [, page, arg] = (location.hash || "#/day").split("/");
@@ -619,7 +651,7 @@ async function renderDay(dateArg, { keepScroll = false, quiet = false } = {}) {
         <div class="work-sum"><div class="value">${numUnits(fmtDur(day.work_total))}</div>
         <div class="foot">${esc(locText)}</div></div></div>
     </div>
-      <section class="card" id="report-card"></section>
+      ${day.reports_off ? "" : `<section class="card" id="report-card"></section>`}
     </div>
 
     <!-- 詳細：時間の内訳と、記録の中身（見出しは付けず、間隔と区切り線で分ける） -->
@@ -685,14 +717,16 @@ async function renderDay(dateArg, { keepScroll = false, quiet = false } = {}) {
 
   clearTimeout(state.refreshTimer); // 入室ボタンなどで描き直したときも、更新のタイマーは 1 つだけにする
   if (day.is_today) {
-    state.refreshTimer = setTimeout(() => {
+    // 1 分ごとに描き直す。書いている途中（日報・入退室の編集など）は、終わるまで 1 分ずつ待つ
+    const tick = () => {
       const editing = document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
       if (editing || state.reportEditing || state.reportBusy || $("#stay-form")) {
-        state.refreshTimer = setTimeout(() => renderDay(dateArg, { keepScroll: true, quiet: true }), 60000);
+        state.refreshTimer = setTimeout(tick, 60000);
       } else {
         renderDay(dateArg, { keepScroll: true, quiet: true }).catch(() => {});
       }
-    }, 60000);
+    };
+    state.refreshTimer = setTimeout(tick, 60000);
   }
 }
 
@@ -894,6 +928,7 @@ function openStayForm(day, stay) {
       </div>
     </form>`;
   const form = $("#stay-form");
+  form.addEventListener("input", () => { form.dataset.dirty = "1"; });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
@@ -1004,11 +1039,21 @@ function webHTML(day, names) {
 
 // ---- 日報（ふだんは整形して表示し、「編集」で書き換える）
 
+// 書いて保存していない日報を、日付ごとにこのブラウザに取っておく（閉じたり、再読み込みしたりしても戻せるように）
+const unsavedKey = (date) => `lablog_unsaved_report_${date}`;
+function keepUnsaved(date, text) {
+  try { if (text === null) localStorage.removeItem(unsavedKey(date)); else localStorage.setItem(unsavedKey(date), text); } catch (e) { /* 保存できないブラウザ */ }
+}
+function unsavedText(date) {
+  try { return localStorage.getItem(unsavedKey(date)); } catch (e) { return null; }
+}
+
 function reportMeta(r) {
   if (!r) return "";
   if (r.pending) return "保存しました（PC に反映待ち）";
-  if (r.edited) return "編集済み";
-  const when = r.generated_ts ? `${new Date(r.generated_ts * 1000).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} 作成` : "";
+  const at = (ts) => new Date(ts * 1000).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  if (r.edited) return r.saved_ts ? `${at(r.saved_ts)} 保存` : "編集済み";
+  const when = r.generated_ts ? `${at(r.generated_ts)} 作成` : "";
   if ((r.source || "").startsWith("ai:")) return `AI（${esc(r.source.slice(3))}）で自動生成・${when}`;
   return `自動生成・${when}`;
 }
@@ -1094,22 +1139,34 @@ function renderReport(day, { editing = false } = {}) {
     ? `<textarea id="report-text" class="note" placeholder="今日の作業をメモ（「## 見出し」「- 箇条書き」が使えます）">${esc(text)}</textarea>`
     : text ? `<div class="md note">${renderMarkdown(text)}</div>`
     : `<div class="empty">まだありません。</div>`;
+  const kept = unsavedText(day.date);
+  const hasKept = kept !== null && kept !== text;
   card.innerHTML = `
     <div class="card-head report-head"><h2>日報</h2><span class="spacer"></span>${buttons}</div>
-    <div class="report-meta" id="report-meta">${reportMeta(r)}</div>
+    <div class="report-meta" id="report-meta">${!editing && hasKept ? "保存していない内容があります（編集で戻せます）" : reportMeta(r)}</div>
     ${body}`;
 
   if (editing) {
     const ta = $("#report-text"), save = $("#report-save");
+    const markDirty = () => {
+      state.reportDirty = true;
+      save.disabled = false;
+      $("#report-meta").textContent = "未保存";
+    };
+    if (hasKept) { // 前に書いて保存していなかった内容を戻す
+      ta.value = kept;
+      markDirty();
+    }
     fitTextarea(ta);
     ta.focus();
-    ta.addEventListener("input", () => { state.reportDirty = true; save.disabled = false; fitTextarea(ta); });
+    ta.addEventListener("input", () => { markDirty(); keepUnsaved(day.date, ta.value); fitTextarea(ta); });
     ta.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !save.disabled) { e.preventDefault(); save.click(); }
       if (e.key === "Escape") { e.preventDefault(); $("#report-cancel").click(); }
     });
     $("#report-cancel").addEventListener("click", () => {
       if (state.reportDirty && !confirm("書きかけの内容を捨てて戻ります。よろしいですか？")) return;
+      keepUnsaved(day.date, null);
       renderReport(day);
     });
     save.addEventListener("click", async () => {
@@ -1121,7 +1178,8 @@ function renderReport(day, { editing = false } = {}) {
         save.disabled = false;
         return;
       }
-      day.report = { ...(r || {}), text: ta.value, edited: 1, pending: !!cloud };
+      keepUnsaved(day.date, null);
+      day.report = { ...(r || {}), text: ta.value, edited: 1, saved_ts: Date.now() / 1000, pending: !!cloud };
       renderReport(day);
       flash("日報を保存しました");
     });
@@ -1137,6 +1195,7 @@ function renderReport(day, { editing = false } = {}) {
     gen.textContent = "作成中…";
     $("#report-meta").textContent = "作成中…";
     state.reportBusy = true;
+    const before = r && r.text;
     try {
       day.report = await api.post("/api/report/generate", { date: day.date, force: true });
     } catch (err) {
@@ -1144,6 +1203,14 @@ function renderReport(day, { editing = false } = {}) {
     } finally {
       state.reportBusy = false;
       renderReport(day);
+    }
+    // 自動生成で置き換えた前の内容に戻せるように（戻すと、自分で保存した日報になる）
+    if (before && day.report && day.report.text !== before) {
+      flash("日報を作り直しました", { label: "元に戻す", run: async () => {
+        await api.post("/api/report/save", { date: day.date, text: before }).catch((err) => alert(err.message));
+        day.report = { ...day.report, text: before, edited: 1, saved_ts: Date.now() / 1000 };
+        renderReport(day);
+      } });
     }
   });
 }
@@ -1386,6 +1453,7 @@ async function renderSettings({ keep = false } = {}) {
 
       <section class="card span-2">
         <div class="card-head"><h2>作業内容の記録</h2></div>
+        <p class="help">オフにしても、記録済みの分は残ります。オフにしていた間の分は、オンに戻しても取り込みません。</p>
         <form id="record-form">
           <div class="record-cols">
             <div>
@@ -1395,6 +1463,7 @@ async function renderSettings({ keep = false } = {}) {
               ${toggle("git", "Git のコミット", rec.git)}
               ${toggle("chrome", "Chrome の閲覧履歴", s.browsers.chrome)}
               ${toggle("edge", "Edge の閲覧履歴", s.browsers.edge)}
+              <p class="help" id="browser-hint" ${rec.apps === "title" || !(s.browsers.chrome || s.browsers.edge) ? "hidden" : ""}>サイトごとに分類するには、「使ったアプリ」を「アプリ名とウィンドウ名」にしてください。</p>
               ${toggle("recent", "Windows の「最近使ったファイル」", rec.recent_files)}
               ${toggle("claude", "Claude Code の会話の題名", s.claude_code.enabled)}
               ${toggle("ocr", "画面の文字", s.screen_text.enabled)}
@@ -1438,22 +1507,11 @@ async function renderSettings({ keep = false } = {}) {
                 <h3 class="sub-title">記録しないアプリ</h3>
                 <label class="field"><span>時間だけを記録するアプリ（1 行に 1 つ。例：line.exe）</span>
                   <textarea name="excluded" rows="4">${esc(s.excluded_apps.join("\n"))}</textarea></label>
+                ${(state.settings.recent_apps || []).length ? `<label class="field"><span>最近使ったアプリから足す</span>
+                  <select id="excluded-pick"><option value="">選ぶ…</option>${state.settings.recent_apps.map((x) =>
+                    `<option value="${esc(x.exe)}">${esc(x.label)}（${esc(x.exe)}）</option>`).join("")}</select></label>` : ""}
               </div>
             </div>
-          </div>
-        </form>
-      </section>
-
-      <section class="card span-2">
-        <div class="card-head"><h2>分類のルール</h2>
-          <span class="sub">上から順に色が決まります。ドメインの先頭に「=」を付けると完全一致</span></div>
-        <form id="cat-form">
-          <div class="cat-edit cat-head"><span>分類名</span><span>アプリ（実行ファイル名）</span><span>サイト（ドメイン）</span><span>ウィンドウ名に含む語</span><span></span></div>
-          <div id="cat-rows">${s.categories.map((c, i) => catRowHTML(c, i, catNames)).join("")}</div>
-          <div class="row" style="margin-top:10px">
-            <button class="btn" type="button" id="cat-add">＋ 分類を追加</button>
-            <span class="spacer"></span>
-            <button class="btn btn-ghost" type="button" id="cat-reset">初期値に戻す</button>
           </div>
         </form>
       </section>
@@ -1463,6 +1521,7 @@ async function renderSettings({ keep = false } = {}) {
         <p class="help">連携すると、入退室履歴をスマホからも確認できます。</p>
         <form id="cloud-form">
           ${toggle("enabled", "連携する", s.cloud.enabled)}
+          <div data-when="enabled">${toggle("reports", "日報もスマホに送る", s.cloud.reports !== false)}</div>
           <p class="help" id="cloud-state">${s.cloud.enabled ? "確認中…" : ""}</p>
           <div class="row" data-when="enabled"><span class="spacer"></span><button class="btn" type="button" id="cloud-export">今すぐ同期</button></div>
         </form>
@@ -1486,9 +1545,42 @@ async function renderSettings({ keep = false } = {}) {
           ${restoreButtonHTML()}
         </div>
       </section>
+
+      <details class="advanced span-2" id="advanced" ${state.advancedOpen ? "open" : ""}>
+        <summary>詳細な設定</summary>
+      <section class="card">
+        <div class="card-head"><h2>分類のルール</h2>
+          <span class="sub">上から順に色が決まります。ドメインの先頭に「=」を付けると完全一致</span></div>
+        <form id="cat-form">
+          <div class="cat-edit cat-head"><span>分類名</span><span>アプリ（実行ファイル名）</span><span>サイト（ドメイン）</span><span>ウィンドウ名に含む語</span><span></span></div>
+          <div id="cat-rows">${s.categories.map((c, i) => catRowHTML(c, i, catNames)).join("")}</div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" type="button" id="cat-add">＋ 分類を追加</button>
+            <span class="spacer"></span>
+            <button class="btn btn-ghost" type="button" id="cat-reset">初期値に戻す</button>
+          </div>
+        </form>
+      </section>
+      </details>
     </div>`;
   restoreDraft(draft);
   syncSettingsSections();
+  $("#advanced").addEventListener("toggle", (e) => { state.advancedOpen = e.target.open; });
+  $("#record-form").addEventListener("change", () => {
+    const f = $("#record-form");
+    $("#browser-hint").hidden = f.apps.value === "title" || !(f.chrome.checked || f.edge.checked);
+  });
+  // 最近使ったアプリから選んだものを、「時間だけを記録するアプリ」に足す（この変更で form の自動保存も動く）
+  const pick = $("#excluded-pick");
+  if (pick) pick.addEventListener("change", () => {
+    const ta = $("#record-form").excluded;
+    const have = lines(ta.value).map((x) => x.toLowerCase());
+    if (pick.value && !have.includes(pick.value)) {
+      ta.value = [...lines(ta.value), pick.value].join("\n");
+      ta.dispatchEvent(new Event("change", { bubbles: true })); // 選ぶ欄は保存の対象ではないので、テキスト欄の変更として保存する
+    }
+    pick.value = "";
+  });
   ["#judge-form", "#record-form", "#ollama-form", "#cloud-form"].forEach((id) => $(id).addEventListener("change", syncSettingsSections));
   loadOllamaState();
   loadCloudState();
@@ -1512,6 +1604,7 @@ async function renderSettings({ keep = false } = {}) {
     git_notify: { enabled: f.notify.checked, hours: Number(f.notify_hours.value) },
   }));
   autoSave($("#cloud-form"), async (f, input) => {
+    if (input.name === "reports") return { cloud: { ...cur().cloud, reports: input.checked } };
     // この PC が書き出しているときは、解除すると OneDrive の記録を消すので、確かめる（やめたらスイッチを戻す）
     if (!input.checked && await isLinked() && !confirm(UNLINK_CONFIRM)) { input.checked = true; return null; }
     return { cloud: { ...cur().cloud, enabled: input.checked } };
@@ -1529,9 +1622,20 @@ async function renderSettings({ keep = false } = {}) {
   $("#update-check").addEventListener("click", () => checkUpdate($("#update-form").channel.value));
   bindRestore();
   $("#cloud-export").addEventListener("click", async () => {
-    await api.post("/api/cloud/export").catch((err) => alert(err.message));
-    flash("同期しました");
-    setTimeout(loadCloudState, 3000);
+    const before = await loadCloudState();
+    try {
+      await api.post("/api/cloud/export");
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
+    flash("同期を始めました");
+    for (let i = 0; i < 15; i++) { // 書き終わる（最終更新が新しくなる）まで、2 秒ごとに確かめる
+      await new Promise((r) => setTimeout(r, 2000));
+      const c = await loadCloudState();
+      if (!c || c.last_error || c.blocked_by) return;
+      if (c.last_export && c.last_export !== (before && before.last_export)) { flash("同期しました"); return; }
+    }
   });
   $$("[data-wifi-register]").forEach((b) => b.addEventListener("click", async () => {
     await api.post("/api/wifi/register", { kind: b.dataset.wifiRegister }).catch((e) => alert(e.message));
@@ -1745,6 +1849,7 @@ async function loadCloudState() {
   } else {
     el.innerHTML = `${who}<span class="tag">連携中</span> ${c.last_export ? `最終更新 ${fmtWhen(c.last_export)}` : ""}<br>${viewer}`;
   }
+  return c;
 }
 
 function catRowHTML(c, i, names) {
@@ -1792,7 +1897,19 @@ function renderFooter() {
 
 // ------------------------------------------------------------ 起動
 
-window.addEventListener("hashchange", route);
+let shownHash = location.hash;
+window.addEventListener("hashchange", () => {
+  if (location.hash === shownHash) return; // 移るのをやめて、元の画面の URL に戻したとき
+  if (hasUnsaved() && !confirm("保存していない内容があります。移動すると消えます。移動しますか？")) {
+    location.hash = shownHash;
+    return;
+  }
+  shownHash = location.hash;
+  route();
+});
+window.addEventListener("beforeunload", (e) => {
+  if (hasUnsaved()) { e.preventDefault(); e.returnValue = ""; }
+});
 (async () => {
   if (cloud) {
     $("[data-tab=settings]").remove();

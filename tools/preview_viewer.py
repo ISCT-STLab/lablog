@@ -27,6 +27,7 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
          ".webmanifest": "application/manifest+json", ".json": "application/json; charset=utf-8",
          ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
 EDIT_NAME = re.compile(r"^[\w.-]+\.json$")
+REJECTED_NAME = re.compile(r"^[\w.-]+\.rejected$")
 
 
 def snapshot(source: Path, work: Path):
@@ -85,8 +86,9 @@ def make_handler(out: Path, viewer_version: str):
             url = unquote(urlparse(self.path).path)
             if url == "/config.js":
                 return self._send(200, config, TYPES[".js"])
-            if url == "/devdata/edits/":
-                names = sorted(p.name for p in (out / "edits").glob("*.json")) if (out / "edits").is_dir() else []
+            if url == "/devdata/edits/":  # OneDrive と同じく、PC が断った修正（.rejected）も一覧に出す
+                names = sorted(p.name for p in (out / "edits").iterdir()
+                               if p.suffix in (".json", ".rejected")) if (out / "edits").is_dir() else []
                 return self._send(200, json.dumps(names).encode(), TYPES[".json"])
             if url.startswith("/devdata/"):
                 path = self._data_path(url[len("/devdata/"):])
@@ -111,10 +113,15 @@ def make_handler(out: Path, viewer_version: str):
             (out / "edits" / name).write_bytes(body)
             self._send(201, b"{}", TYPES[".json"])
 
-        def do_DELETE(self):  # ビューアーがサインインしたときに消す、連携を解除した印だけ
-            if unquote(urlparse(self.path).path) != "/devdata/unlinked.json":
+        def do_DELETE(self):  # ビューアーが消すもの：連携を解除した印と、断られた修正（理由を読んだあと）
+            url = unquote(urlparse(self.path).path)
+            name = url[len("/devdata/edits/"):] if url.startswith("/devdata/edits/") else ""
+            if url == "/devdata/unlinked.json":
+                (out / "unlinked.json").unlink(missing_ok=True)
+            elif REJECTED_NAME.match(name):
+                (out / "edits" / name).unlink(missing_ok=True)
+            else:
                 return self._send(400, b"bad name")
-            (out / "unlinked.json").unlink(missing_ok=True)
             self._send(204, b"")
 
     return Handler

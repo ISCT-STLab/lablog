@@ -101,7 +101,9 @@ def download(url: str, dest: Path, size: int | None, digest: str | None, progres
             progress(done)
     if size and done != size:
         raise RuntimeError("ダウンロードが途中で切れました。もう一度お試しください")
-    if digest and digest.startswith("sha256:") and digest.split(":", 1)[1].lower() != sha.hexdigest():
+    if not (digest and digest.startswith("sha256:")):
+        raise RuntimeError("リリースのファイルに SHA-256 が付いていないため、更新できません")
+    if digest.split(":", 1)[1].lower() != sha.hexdigest():
         raise RuntimeError("ダウンロードしたファイルが壊れています（SHA-256 が合いません）")
 
 

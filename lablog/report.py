@@ -12,7 +12,7 @@ import time
 import urllib.request
 from datetime import date
 
-from .config import OTHER_CATEGORY, is_local_url
+from .config import OTHER_CATEGORY, is_cloud_model, is_local_url
 from .days import fmt_duration, fmt_hm
 from .summary import day_summary
 
@@ -165,7 +165,9 @@ def ollama_status(cfg: dict) -> dict:
         return {"running": False, "error": "PC 内の URL ではありません"}
     try:
         with _no_proxy.open(url.rstrip("/") + "/api/tags", timeout=3) as r:
-            models = [m["name"] for m in json.load(r).get("models", [])]
+            # クラウドモデル（PC の外で動く）は使わない。選べないように一覧からも除く
+            models = [m["name"] for m in json.load(r).get("models", [])
+                      if not m.get("remote_host") and not is_cloud_model(m["name"])]
     except Exception:
         return {"running": False, "models": [], "model_ready": False}
     want = cfg.get("model", "")
@@ -237,10 +239,17 @@ def generate_report(conn, settings, d: date, force: bool = False) -> dict:
                 log.exception("ローカル AI での日報作成に失敗しました。集計だけで作ります")
         if not text:
             text = rule_based_report(s)
-        conn.execute("INSERT INTO reports (date, text, edited, generated_ts, source) VALUES (?, ?, 0, ?, ?) "
-                     "ON CONFLICT(date) DO UPDATE SET text = excluded.text, edited = 0, "
-                     "generated_ts = excluded.generated_ts, source = excluded.source",
-                     (d.isoformat(), text, now, source))
+        # AI の応答を待つあいだに画面で保存した日報は上書きしない（作り始めたときと同じ内容のときだけ書く）
+        if row:
+            cur = conn.execute("UPDATE reports SET text = ?, edited = 0, generated_ts = ?, source = ? "
+                               "WHERE date = ? AND text IS ? AND edited IS ?",
+                               (text, now, source, d.isoformat(), row["text"], row["edited"]))
+        else:
+            cur = conn.execute("INSERT OR IGNORE INTO reports (date, text, edited, generated_ts, source) "
+                               "VALUES (?, ?, 0, ?, ?)", (d.isoformat(), text, now, source))
+        if not cur.rowcount:
+            log.info("日報を作っているあいだに保存されたため、作った内容は使いません（%s）", d)
+            return dict(conn.execute("SELECT * FROM reports WHERE date = ?", (d.isoformat(),)).fetchone())
         return {"date": d.isoformat(), "text": text, "edited": 0, "generated_ts": now, "source": source}
 
 
@@ -248,6 +257,7 @@ MAX_REPORT_CHARS = 50_000  # 画面・スマホ版から保存できる日報の
 
 
 def save_report(conn, d: date, text: str):
-    conn.execute("INSERT INTO reports (date, text, edited, generated_ts, source) VALUES (?, ?, 1, NULL, 'user') "
-                 "ON CONFLICT(date) DO UPDATE SET text = excluded.text, edited = 1",
-                 (d.isoformat(), text))
+    conn.execute("INSERT INTO reports (date, text, edited, generated_ts, source, saved_ts) "
+                 "VALUES (?, ?, 1, NULL, 'user', ?) "
+                 "ON CONFLICT(date) DO UPDATE SET text = excluded.text, edited = 1, saved_ts = excluded.saved_ts",
+                 (d.isoformat(), text, time.time()))

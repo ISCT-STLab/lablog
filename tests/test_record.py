@@ -49,13 +49,16 @@ class RecordSettingsTest(unittest.TestCase):
         self.assertEqual(s.get("record"), {"apps": "title", "files": True, "git": True, "recent_files": True})
         self.assertTrue(s.get("ollama")["enabled"])
 
-    def test_old_settings_get_new_keys(self):
-        # record も ollama.enabled も無い前の版の設定
+    def test_old_settings_get_new_keys_turned_off(self):
+        """前のバージョンの設定に無い記録の項目は、オフで補う（選んでいない記録を、更新で始めない）。"""
+        # record も ollama.enabled も無い前のバージョンの設定
         self.path.write_text('{"ollama": {"url": "http://127.0.0.1:11434", "model": "qwen3:8b", "auto": false}}',
                              encoding="utf-8")
         s = Settings(self.path)
-        self.assertEqual(s.get("record")["apps"], "title")
-        self.assertEqual(s.get("ollama"), {"enabled": True, "url": "http://127.0.0.1:11434", "model": "qwen3:8b",
+        self.assertEqual(s.get("record"), {"apps": "off", "files": False, "git": False, "recent_files": False})
+        self.assertEqual(s.get("browsers"), {"chrome": False, "edge": False})
+        self.assertFalse(s.get("cloud")["enabled"])
+        self.assertEqual(s.get("ollama"), {"enabled": False, "url": "http://127.0.0.1:11434", "model": "qwen3:8b",
                                            "auto": False})
 
     def test_update(self):

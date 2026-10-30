@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import __version__, backup, db, update
 from .aisetup import setup_info
+from .categorize import app_label
 from .config import DEFAULT_CATEGORIES
 from .days import fmt_duration, fmt_hm, logical_date, parse_date, parse_month, recent_clock_time
 from .presence import delete_stay, save_stay
@@ -29,6 +30,8 @@ from .report import MAX_REPORT_CHARS, generate_report, save_report
 from .summary import day_summary, month_summary
 from .wifi import WIFI_KINDS
 from .winapi import run_quiet
+
+MAX_JSON_BYTES = 1_000_000  # 画面から送る JSON の大きさ（日報は MAX_REPORT_CHARS 文字まで）
 
 log = logging.getLogger(__name__)
 
@@ -84,10 +87,15 @@ class Api:
         return month_summary(db.thread_conn(), self.app.settings, year, month, time.time())
 
     def get_settings(self, q):
-        count = db.thread_conn().execute("SELECT COUNT(*) FROM screen_texts").fetchone()[0]
+        conn = db.thread_conn()
+        count = conn.execute("SELECT COUNT(*) FROM screen_texts").fetchone()[0]
+        # 最近 30 日に使ったアプリ（「時間だけを記録するアプリ」を、名前から選べるように）
+        rows = conn.execute("SELECT lower(exe) AS exe, SUM(end_ts - start_ts) AS t FROM segments "
+                            "WHERE start_ts > ? AND exe != '' AND idle = 0 GROUP BY lower(exe) ORDER BY t DESC LIMIT 40",
+                            (time.time() - 30 * 86400,)).fetchall()
         return {"settings": self.app.settings.snapshot(), "data_dir": str(db.db_path().parent),
                 "repos": self.app.repos, "ssids": self.app.status_snapshot().get("ssids", []),
-                "screen_text_count": count}
+                "screen_text_count": count, "recent_apps": [{"exe": r["exe"], "label": app_label(r["exe"])} for r in rows]}
 
     def get_ollama(self, q):
         return setup_info(self.app.settings.get("ollama")) | {"job": self.app.ollama_setup.status()}
@@ -98,7 +106,8 @@ class Api:
     # ---- POST
 
     def post_settings(self, body):
-        linked = self.app.settings.get("cloud")["enabled"]
+        before = self.app.settings.get("cloud")
+        linked = before["enabled"]
         try:
             snapshot = self.app.settings.update(body)
         except ValueError as exc:
@@ -108,6 +117,8 @@ class Api:
             self.app.cloud.request_unlink()   # 連携を解除した：OneDrive の記録を消し、スマホ版をサインアウトさせる
         elif snapshot["cloud"]["enabled"] and not linked:
             self.app.cloud.request_export()   # 連携した：書き出し先をすぐ探す
+        elif snapshot["cloud"]["reports"] != before.get("reports", True):
+            self.app.cloud.request_full_export()  # 日報を送る・送らないを変えた：書き出した日報も合わせる
         return {"settings": snapshot}
 
     def post_categories_reset(self, body):
@@ -263,6 +274,7 @@ class Api:
 
     def post_screen_texts_clear(self, body):
         db.thread_conn().execute("DELETE FROM screen_texts")
+        db.forget_deleted(db.thread_conn())
         return {"ok": True}
 
     def post_cloud_takeover(self, body):
@@ -307,8 +319,8 @@ POST_ROUTES = {"/api/settings": "post_settings", "/api/categories/reset": "post_
                "/api/screen_texts/clear": "post_screen_texts_clear"}
 
 
-KEY_REQUIRED = {"error": "このページは、LabLog を起動した Windows のアカウントからだけ開けます。"
-                        "スタートメニューの「LabLog」から開き直してください。", "code": "key_required"}
+KEY_REQUIRED = {"error": "このページを開くには合言葉が要ります。スタートメニューの「LabLog」から開き直してください。",
+                "code": "key_required"}
 COOKIE_MAX_AGE = 10 * 365 * 24 * 3600
 
 
@@ -317,6 +329,7 @@ def make_handler(api: Api, key: str, port: int):
     cookie_name = f"lablog_key_{port}"
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = 30  # 送る途中で止まった接続を、いつまでも待たない
         server_version = "LabLog"
         protocol_version = "HTTP/1.1"
 
@@ -411,8 +424,17 @@ def make_handler(api: Api, key: str, port: int):
             self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
-            # 本文は必ず先に読み切る（読み残すと、同じ接続の次のリクエストが壊れる）
-            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            # 本文は必ず先に読み切る（読み残すと、同じ接続の次のリクエストが壊れる）。
+            # 大きすぎるものは読まずに断り、接続を閉じる（合言葉を確かめる前に、大きな本文でメモリを使わせない）
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            limit = backup.MAX_BYTES if urlparse(self.path).path == "/api/backup/restore" else MAX_JSON_BYTES
+            if not 0 <= length <= limit:
+                self.close_connection = True
+                return self._send(413, b"too large", "text/plain")
+            raw = self.rfile.read(length)
             # 他のサイトから勝手に操作されないよう、独自ヘッダー付きのリクエストだけ受け付ける
             if not self._host_ok() or self.headers.get("X-LabLog") != "1":
                 return self._send(403, b"forbidden", "text/plain")
