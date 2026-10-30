@@ -28,6 +28,12 @@ const SETUP_MATERIALS = [
   { key: "ocr", label: "画面の文字", desc: "一部のアプリケーション利用時、画面のスクリーンショットから文字を抽出し、作業内容を推測します。スクリーンショット画像はその場で破棄されます。テキストは日報の作成に利用されたあと、3日で削除されます。" },
 ];
 const SETUP_APPS = [["title", "アプリ名とウィンドウ名"], ["app", "アプリ名だけ"], ["off", "記録しない"]];
+// 作業内容の記録を、まとめて選ぶ（選んだあとも、下の項目を一つずつ変えられる）
+const SETUP_PRESETS = [
+  ["時間だけ", { apps: "off", files: false, git: false, chrome: false, edge: false, recent: false, claude: false, ocr: false }],
+  ["基本", { apps: "title", files: true, git: true, chrome: false, edge: false, recent: true, claude: true, ocr: false }],
+  ["すべて", { apps: "title", files: true, git: true, chrome: true, edge: true, recent: true, claude: true, ocr: true }],
+];
 // 判定方法の選択肢は設定の画面と同じもの（app.js の presenceMethods）
 const SETUP_PLACES = [["home", "自宅"], ["other", "その他"]];
 const SETUP_REMOTE = [
@@ -113,6 +119,10 @@ function drawSetupBody() {
 function bindSetupInputs(root, redraw) {
   $$("[data-setup-key]", root).forEach((b) => b.addEventListener("click", () => {
     setupState.a[b.dataset.setupKey] = JSON.parse(b.dataset.value);
+    redraw();
+  }));
+  $$("[data-preset]", root).forEach((b) => b.addEventListener("click", () => {
+    Object.assign(setupState.a, SETUP_PRESETS[Number(b.dataset.preset)][1]);
     redraw();
   }));
   $$("[data-setup-toggle]", root).forEach((input) => input.addEventListener("change", () => {
@@ -237,8 +247,13 @@ function setupRecord(el, a) {
       <div class="setup-item-text"><b>${esc(label)}</b>${desc ? `<span class="help">${esc(desc)}</span>` : ""}</div>
       <div class="seg">${buttons}</div>
     </div>`;
+  const presets = SETUP_PRESETS.map(([label, p], i) => {
+    const on = Object.entries(p).every(([k, v]) => a[k] === v);
+    return `<button type="button" class="seg-btn ${on ? "on" : ""}" data-preset="${i}" aria-pressed="${on}">${esc(label)}</button>`;
+  }).join("");
   el.innerHTML = `
     <p>PC での作業内容を記録できます。${a.autoReport ? "記録をもとに日報が自動作成されます。" : ""}</p>
+    ${row("まとめて選ぶ", "", presets)}
     ${row("使ったアプリ", "アプリの名前とウィンドウ名", SETUP_APPS.map(([v, l]) => setupSegment("apps", v, l)).join(""))}
     ${SETUP_MATERIALS.map((m) => row(m.label, m.desc, setupSegment(m.key, true, "記録する") + setupSegment(m.key, false, "しない"))).join("")}`;
 }

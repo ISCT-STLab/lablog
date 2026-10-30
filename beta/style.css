@@ -160,6 +160,13 @@ body { padding-top: var(--head-space, 64px); }
 .pill.tentative .dot { background: var(--warning); }
 .pill.paused { background: color-mix(in srgb, var(--critical) 14%, transparent); color: var(--critical); }
 .pill.paused .dot { background: var(--critical); }
+.pill.rec { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good-text); cursor: default; }
+.pill.rec .dot { background: var(--good); }
+/* 一時停止のボタン：アイコンに文字を添える（場所の無いスマホ幅と小さいバーでは、アイコンだけ） */
+#pause { gap: 6px; }
+#pause .btn-label { font-size: calc(13px * var(--fs)); font-weight: 600; }
+.topbar.compact #pause .btn-label { display: none; }
+.topbar.compact .status .pill.rec { display: none; }
 /* ビューアー：ページの一番上の右に最終更新。PC からの更新が途絶えていれば薄く */
 .page-top:not(:empty) { text-align: right; padding-top: 6px; font-size: calc(12px * var(--fs)); color: var(--muted); }
 .page-top .stale { opacity: .6; }
@@ -179,12 +186,14 @@ body { padding-top: var(--head-space, 64px); }
   .topbar:not(.compact) .topbar-inner { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
                                         align-items: center; row-gap: 4px; }
   .topbar:not(.compact) .brand { grid-column: 1; grid-row: 1; }
-  .topbar:not(.compact) .topbar-inner:has(.status:not(:empty)) .brand { grid-row: 1 / span 2; }
+  .topbar:not(.compact) .topbar-inner:has(.status .pill:not(.rec)) .brand { grid-row: 1 / span 2; }
   .topbar:not(.compact) .clock { grid-column: 2; grid-row: 1; justify-self: end; }
   .topbar:not(.compact) .tabs { grid-column: 3; grid-row: 1; }
   .topbar:not(.compact) .tools { grid-column: 4; grid-row: 1; }
   .topbar:not(.compact) .status { grid-column: 2 / -1; grid-row: 2; }
-  .topbar:not(.compact) .status:empty { display: none; }
+  .topbar:not(.compact) .status:not(:has(.pill:not(.rec))) { display: none; }
+  /* 「記録中」は場所を取るので出さない（一時停止中だけ出す）。ボタンもアイコンだけ */
+  .status .pill.rec, #pause .btn-label { display: none; }
 }
 /* iPhone・iPad（iOS 26）：ページは時計の下から始まり、ページの上の端から約 30pt には iOS が「ぼかし」をかける
    （ページ側からは消せない）。浮いたヘッダーはその範囲より下（32px）に置いて縁をくっきりさせる */
@@ -284,6 +293,9 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 .seg-btn + .seg-btn { border-left: 1px solid var(--border); }
 .seg-btn:hover { background: var(--surface-2); }
 .seg-btn.on { background: var(--accent); color: #fff; }
+/* 設定の画面の「詳細な設定」（ふだんは、たたんでおく） */
+.advanced > summary { cursor: pointer; padding: 6px 2px; font-weight: 700; color: var(--ink-2); }
+.advanced[open] > summary { margin-bottom: 12px; }
 .setup-samples { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px 20px; margin: 10px 0; }
 .setup-samples .inner-title { margin-top: 4px; }
 /* オン・オフのスイッチ（初期設定・設定の画面） */
