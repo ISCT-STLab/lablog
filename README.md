@@ -177,7 +177,7 @@ PC と同じ画面を、スマホ（iPhone・Android）やタブレットのブ�
 4. `python tools/release.py` で、`dist/LabLog-<バージョン>.zip` と、リリースの説明に使う `dist/LabLog-<バージョン>-notes.md` を作ります。
 5. GitHub の [Releases](https://github.com/ISCT-STLab/lablog/releases) で「Draft a new release」を押し、タグを `v<バージョン>` にして、ZIP を添付し、説明に `LabLog-<バージョン>-notes.md` の中身を貼って公開します。ベータ版のときは「Set as a pre-release」に印を付けます。
    - `gh` を入れていれば：`gh release create v<バージョン> dist/LabLog-<バージョン>.zip --title "LabLog <バージョン>" --notes-file dist/LabLog-<バージョン>-notes.md`（ベータ版は `--prerelease` を付ける）
-6. ブラウザ版（ビューアー）を公開し直します：安定版は `python tools/publish_viewer.py --push`、ベータ版は `python tools/publish_viewer.py --beta --push`（`…/lablog/beta/` に置きます）。ブラウザ版は、自分より古い PC の LabLog を見ると「更新してください」と知らせます。
+6. ブラウザ版（ビューアー）を公開し直します：安定版は `python tools/publish_viewer.py --push`、ベータ版は `python tools/publish_viewer.py --beta --push`（`…/lablog/beta/` に置きます）。正式なバージョンがまだ無いあいだは、ベータ版を出すときも安定版を公開し直します（PC の LabLog がスマホ用に案内するのは安定版のため）。ブラウザ版は、自分より古い PC の LabLog を見ると「更新してください」と知らせます。
 
 LabLog の「更新を確認」は、GitHub の API を認証なしで使います。リポジトリが公開されていないと、新しいバージョンを見つけられません。
 

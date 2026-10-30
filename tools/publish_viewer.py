@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 from lablog import GITHUB_REPO, VIEWER_URL, __version__  # noqa: E402
 
 WEB_DIR = ROOT / "lablog" / "web"
-DEFAULT_SITE = ROOT.parent / "lablog-viewer"
+DEFAULT_SITE = ROOT.parent / "lablog-pages"  # 研究室の組織のリポジトリ（gh-pages）に送る公開用フォルダ
 DEFAULT_REMOTE = f"https://github.com/{GITHUB_REPO}.git"
 FILES = ["index.html", "style.css", "app.js", "setup.js", "cloud.js", "sw.js", "favicon.svg", "manifest.webmanifest",
          "icon-180.png", "icon-192.png", "icon-512.png", "fonts/KleeOne-Regular.woff2", "fonts/OFL.txt"]
