@@ -453,8 +453,8 @@ class LegacyRestoreTest(unittest.TestCase):
     def test_new_id(self):
         self.assertNotEqual(self.sync._device(self.conn)["id"], "old-id")
 
-    def test_same_pc_continues(self):
-        self.assertIsNone(self.other(self.sync._device(self.conn)["name"]))
+    def test_same_name_requires_explicit_takeover_without_machine_identity(self):
+        self.assertIsNotNone(self.other(self.sync._device(self.conn)["name"]))
 
     def test_other_pc_is_not_this_pc(self):
         self.assertIsNotNone(self.other("ANOTHER-PC"))

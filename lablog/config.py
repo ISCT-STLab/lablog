@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -366,12 +367,25 @@ class Settings:
                     checked[key] = VALIDATORS[key](value)
                 except (TypeError, AttributeError, KeyError) as exc:  # 辞書のはずが数値だった など
                     raise ValueError(f"設定の形が正しくありません: {key}") from exc
-            self._data.update(checked)
-            self.save()
+            before = self._data
+            self._data = before | checked
+            try:
+                self.save()
+            except OSError:
+                self._data = before
+                raise
             return copy.deepcopy(self._data)
 
     def save(self):
         with self._lock:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, self.path)
+                    break
+                except PermissionError as exc:
+                    # Windows でファイルが一時的に使用中なら、短く待って置き換えをやり直す。
+                    if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 4:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))

@@ -113,17 +113,16 @@ def queue_restore(data: bytes) -> dict:
 
 def _forget_other_pc(db_file: Path):
     """戻した記録が別の PC のもの（または、どの PC のものか分からない前のバージョンのもの）なら、
-    スマホ版へ書き出す PC の印を作り直させる（cloud.py の _device）。前の印は、同じ PC だったと分かったときのために残す。"""
+    スマホ版へ書き出す PC の印を作り直させる（cloud.py の _device）。PC 名では同一性を判定しない。"""
     from .cloud import machine_id
     try:
         conn = sqlite3.connect(db_file)
         try:
             kv = dict(conn.execute("SELECT key, value FROM kv WHERE key IN ('device_id', 'device_machine')").fetchall())
             if kv.get("device_id") and kv.get("device_machine") != machine_id():
-                conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES ('device_id_before_restore', ?)",
-                             (kv["device_id"],))
                 conn.execute("DELETE FROM kv WHERE key IN ('device_id', 'device_machine')")
-                conn.commit()
+            conn.execute("DELETE FROM kv WHERE key = 'device_id_before_restore'")
+            conn.commit()
         finally:
             conn.close()
     except sqlite3.Error:

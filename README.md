@@ -165,7 +165,7 @@ PC と同じ画面を、スマホ（iPhone・Android）やタブレットのブ�
 
 - Python 3.11 以降の標準ライブラリだけで動きます（追加のインストールは不要）。
 - リポジトリのフォルダから動かすとき：`python LabLog.pyw`。ログオン時に自動で起動するには `install_autostart.ps1`、やめるには `uninstall_autostart.ps1` を実行します（このときは LabLog の画面からは更新せず、`git pull` で更新します）。
-- テスト：`python -m unittest`
+- テスト：`python -m unittest`（Node.js があれば画面の回帰テストも実行。個別実行は `node --test tests/web_report.test.cjs`）
 - 本番のデータと分けて試すとき：`python LabLog.pyw --port 8766 --data-dir <テスト用フォルダ>`
 - ビューアーを PC で試すとき：`python tools/preview_viewer.py`（いまの記録の写しを使い、サインインなしで `http://127.0.0.1:8770/` に開く）
 - ビューアーを公開し直すとき：`python tools/publish_viewer.py --push`（`lablog/web` の画面ファイルを `..\lablog-viewer` に写して GitHub の gh-pages ブランチに送る。記録は含めない）

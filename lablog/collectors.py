@@ -167,16 +167,20 @@ def import_claude_code(conn, now: float, root: Path | None = None):
     floor = enabled_since(conn, "claude_code")
     pauses = paused_ranges(conn, 0, now, now)
     paused_now = conn.execute("SELECT 1 FROM pauses WHERE end_ts IS NULL").fetchone() is not None
-    # 前回すべてのファイルを読んだ時刻。それより後に書き足された分は、前回から今までに書かれたもの
-    scanned = float(kv_get(conn, "claude:scanned_at", 0) or 0)
     for path in root.glob("*/*.jsonl"):
         key = f"claude:{path}"
-        size = path.stat().st_size
+        stat = path.stat()
+        size = stat.st_size
+        file_id = f"{stat.st_dev}:{stat.st_ino}"
         offset = int(kv_get(conn, key, -1))
+        previous_id = kv_get(conn, key + ":file_id")
+        observed = float(kv_get(conn, key + ":observed_at", 0) or 0)
+        if offset > size or (previous_id and previous_id != file_id):  # 作り直されたファイルは初回として扱う
+            offset, observed = -1, 0
         first = offset < 0
-        if offset > size:  # ファイルが作り直された
-            offset = 0
         if offset == size:
+            kv_set(conn, key + ":observed_at", now)
+            kv_set(conn, key + ":file_id", file_id)
             continue
         with open(path, "rb") as fh:
             fh.seek(max(offset, 0))
@@ -208,9 +212,13 @@ def import_claude_code(conn, now: float, root: Path | None = None):
 
         # 題名の変更の行には時刻が無いので、いつ付けたかは「前回読んでから今まで」としか分からない。
         # そのあいだに一時停止やオフがあれば（いま止めていても）、題名は取り込まない（前後の行の時刻は根拠にしない）
-        read_from = scanned or since  # 前回の読み込みのあとにできたファイルも、前回から今までに書かれたもの
-        titles_ok = (not paused_now and floor <= read_from
+        # 初めて見たファイルは、別のファイルの読了時刻を根拠にしない。
+        read_from = observed or since
+        titles_ok = (not paused_now and floor <= read_from <= now
                      and not paused_ranges(conn, read_from, now, now))
+        # 同じファイルの読了位置からの追記なら、近くに時刻がなくても観測区間で判定できる。
+        # 初回・置き換え・旧版で観測時刻のないファイルには適用しない。
+        known_interval = not first and bool(observed) and previous_id == file_id
 
         sessions: dict[str, dict] = {}
         minutes: set[tuple[str, float]] = set()
@@ -218,7 +226,8 @@ def import_claude_code(conn, now: float, root: Path | None = None):
             sid = line["sessionId"]
             s = sessions.setdefault(sid, {"title": None, "folder": None, "first": None, "last": None})
             kind = line.get("type")
-            if kind in ("custom-title", "agent-name") and not (titles_ok and allowed(ref)):
+            if kind in ("custom-title", "agent-name") and not (
+                    titles_ok and (allowed(ref) or (ref is None and known_interval))):
                 continue
             if kind == "custom-title" and isinstance(line.get("customTitle"), str):
                 s["title"] = line["customTitle"].strip()[:100] or s["title"]
@@ -245,7 +254,12 @@ def import_claude_code(conn, now: float, root: Path | None = None):
         conn.executemany("INSERT OR IGNORE INTO ai_activity (source, session_id, minute) VALUES ('claude-code', ?, ?)",
                          sorted(minutes))
         kv_set(conn, key, max(offset, 0) + end)
-    kv_set(conn, "claude:scanned_at", now)
+        kv_set(conn, key + ":file_id", file_id)
+        # 末尾に書きかけがあれば、次に完成した行も前回からの区間で判定する。
+        if end == len(chunk):
+            kv_set(conn, key + ":observed_at", now)
+        elif not observed:
+            kv_set(conn, key + ":observed_at", 0)
 
 
 # ---------------------------------------------------------------- 最近使ったファイル
