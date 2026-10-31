@@ -363,7 +363,7 @@ async function setupAccount(el, a) {
     </div>
     ${a.cloud ? `<div class="switch-list">${setupToggle("reports", "日報もスマホに送る")}</div>
       <p class="help">日報には、ファイル名などが入ることがあります。</p>` : ""}
-    ${a.cloud && url ? `<p class="help">スマホで <a href="${safeHref(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a> を開き、同じアカウントでサインインしてください。</p>` : ""}`;
+    ${a.cloud && url ? viewerLinkHTML(url) : ""}`;
   bindSetupInputs(el, drawSetupBody);
 }
 

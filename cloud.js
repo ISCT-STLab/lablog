@@ -15,13 +15,14 @@ window.LabLogCloud = (() => {
   const HERE = location.origin + location.pathname;
   const KEY = { token: "lablog.token", login: "lablog.login", silent: "lablog.silent", pending: "lablog.pending",
                 rejected: "lablog.rejected",
-                cache: "lablog.cache:", cacheIndex: "lablog.cache-index", marker: "lablog.marker" };
+                cache: "lablog.cache:", cacheIndex: "lablog.cache-index", marker: "lablog.marker",
+                unlinkAck: "lablog.unlink-ack" };
   const MARKER = { app: "LabLog viewer" }; // PC の LabLog はこの中身の viewer.json を目印に書き出し先を探す
   const CACHE_SEC = 60;
   const CACHE_FILES = 80;
   const DAY_START_HOUR = 5;
   const WEEKDAYS = "日月火水木金土";
-  const state = { offline: false, pendingChecked: 0 };
+  const state = { offline: false, pendingChecked: 0, linkChecked: 0, linkError: "" };
 
   class SignInRequired extends Error {
     constructor(msg) { super(msg); this.name = "SignInRequired"; }
@@ -74,7 +75,7 @@ window.LabLogCloud = (() => {
     return tok;
   }
 
-  // Microsoft のサインイン画面から戻ってきたときの処理。新しくサインインできたら true。
+  // ボタンからサインインしたときだけ true。自動の認証更新では連携解除を取り消さない。
   async function finishSignIn() {
     const p = new URLSearchParams(location.search);
     if (!p.has("code") && !p.has("error")) return false;
@@ -90,7 +91,7 @@ window.LabLogCloud = (() => {
     }
     await tokenRequest({ grant_type: "authorization_code", code: p.get("code"),
                          code_verifier: pending.verifier, redirect_uri: HERE });
-    return true;
+    return !pending.silent;
   }
 
   let refreshing = null;
@@ -198,6 +199,42 @@ window.LabLogCloud = (() => {
 
   const store = cfg.dev ? devStore : graphStore;
 
+  function checkUnlinked(unlinked) {
+    // 再連携時に確認済みの解除通知が遅れて届いても、再びサインアウトしない。
+    if (unlinked && !(Number.isFinite(unlinked.unlinked) && unlinked.unlinked === load(KEY.unlinkAck))) {
+      const e = new Error("PC で Microsoft アカウント連携が解除されました。再開するには、PC で連携をオンにしてからサインインしてください。");
+      e.name = "Unlinked";
+      throw e;
+    }
+  }
+
+  let linking = null;
+  function ensureViewerLink(reconnect = false) {
+    if (cfg.dev) return Promise.resolve();
+    if (linking) return linking;
+    linking = (async () => {
+      const unlinked = await store.read("unlinked.json");
+      if (!reconnect) checkUnlinked(unlinked);
+      if (reconnect && Number.isFinite(unlinked && unlinked.unlinked)) save(KEY.unlinkAck, unlinked.unlinked);
+      const marker = await store.read("viewer.json");
+      if (reconnect || !marker || marker.app !== MARKER.app) {
+        await store.ensureRoot();
+        const fresh = { ...MARKER, signed_in: Date.now() / 1000 };
+        await store.write("viewer.json", fresh);
+        save(KEY.marker, fresh);
+        clearCache();
+      } else {
+        save(KEY.marker, marker); // 端末の「連携済み」だけで判断せず、OneDrive 上の目印を確かめる
+      }
+      // 解除通知は残し、この端末が確認した通知だけを無視する。
+      // 読んだ直後に PC が再び解除しても、新しい通知を削除してしまわないため。
+      state.linkError = "";
+      state.linkChecked = Date.now();
+    })().catch((e) => { state.linkError = e.message; throw e; })
+      .finally(() => { linking = null; });
+    return linking;
+  }
+
   // ---- 読み込み（1分間は読み直さない。通信できないときは前に読んだ内容を使う）
 
   const mem = new Map();
@@ -210,7 +247,8 @@ window.LabLogCloud = (() => {
 
   async function read(path) {
     const hit = mem.get(path) || load(KEY.cache + path);
-    if (hit && Date.now() - hit.t < CACHE_SEC * 1000) return hit.data;
+    const ttl = path === "unlinked.json" || (hit && hit.data == null) ? 10 : CACHE_SEC;
+    if (hit && Date.now() - hit.t < ttl * 1000) return hit.data;
     try {
       const data = await store.read(path);
       const entry = { t: Date.now(), data };
@@ -328,16 +366,15 @@ window.LabLogCloud = (() => {
   // ---- app.js からの /api/... の呼び出しを受ける
 
   async function getStatus() {
-    const meta = await read("meta.json");
-    // PC で連携を解除すると、PC が記録を消して unlinked.json を置く（cloud.py の unlink）。見つけたらサインアウトする
-    if (!meta && await read("unlinked.json")) {
-      const e = new Error("PC で Microsoft アカウント連携が解除されました。");
-      e.name = "Unlinked";
-      throw e;
+    const [meta, unlinked] = await Promise.all([read("meta.json"), read("unlinked.json")]);
+    checkUnlinked(unlinked); // 古い記録のキャッシュがあっても、明示的な連携解除は反映する
+    if ((!meta || state.linkError) && Date.now() - state.linkChecked >= 30000) {
+      try { await ensureViewerLink(); }
+      catch (e) { if (e.name === "Unlinked" || e.name === "SignInRequired") throw e; }
     }
     await checkPending(meta);
     const base = { today: today(), offline: state.offline, pending: pendingEdits().length,
-                   rejected: load(KEY.rejected) || [] };
+                   rejected: load(KEY.rejected) || [], link_error: state.linkError };
     if (!meta) return { ...base, state: "none" };
     // app_version：PC の LabLog のバージョン（前のバージョンの PC は書かない）。viewer_version：このビューアーを公開したときのバージョン
     return { ...meta.status, ...base, exported: meta.exported, app_version: meta.app_version || null,
@@ -406,23 +443,21 @@ window.LabLogCloud = (() => {
     if ("serviceWorker" in navigator && !cfg.dev) navigator.serviceWorker.register("sw.js").catch(() => {});
     if (cfg.dev) return { signedIn: true };
     if (!cfg.clientId) return { signedIn: false, error: "ビューアーの準備（Microsoft へのアプリ登録）がまだ終わっていません。" };
+    let reconnect = false;
     try {
-      await finishSignIn();
+      reconnect = await finishSignIn();
     } catch (e) {
       return { signedIn: false, error: e.message };
     }
     const tok = load(KEY.token);
     const signedIn = !!(tok && (tok.access || tok.refresh)) || (!!tok && Date.now() - (load(KEY.silent) || 0) > 10 * 60 * 1000);
-    if (signedIn && !load(KEY.marker)) {
-      // 初めて使うとき（連携を解除したあとも）は、ここで OneDrive にアプリ専用フォルダを作り、PC が書き出し先を見つけるための目印を置く
+    if (signedIn) {
       try {
-        await store.ensureRoot();
-        await store.write("viewer.json", { ...MARKER, signed_in: Date.now() / 1000 });
-        await store.remove("unlinked.json");
-        save(KEY.marker, Date.now());
+        await ensureViewerLink(reconnect);
       } catch (e) {
+        if (e.name === "Unlinked") { signOut(); return { signedIn: false, error: e.message }; }
         if (e.name === "SignInRequired") return { signedIn: false };
-        return { signedIn: false, error: e.message };
+        // 一時的な通信エラーならサインインをやり直させず、状態の確認時に再試行する。
       }
     }
     return { signedIn };
@@ -431,9 +466,12 @@ window.LabLogCloud = (() => {
   function signOut() {
     Object.keys(localStorage).filter((k) => k.startsWith("lablog.")).forEach((k) => localStorage.removeItem(k));
     mem.clear();
+    state.linkChecked = 0;
+    state.linkError = "";
   }
 
-  return { api, ready, signIn: () => signIn(), signOut, clearCache, dev: !!cfg.dev, build: cfg.build || "",
+  return { api, ready, signIn: () => signIn(), signOut, clearCache, reconnect: () => ensureViewerLink(true),
+           dev: !!cfg.dev, build: cfg.build || "",
            version: cfg.version || "",
            dismissRejected: () => save(KEY.rejected, null) };
 })();

@@ -678,6 +678,11 @@ details.group .inner .list-item { font-size: calc(13px * var(--fs)); padding: 4p
 @media (max-width: 900px) { .cat-edit { grid-template-columns: minmax(0, 1fr); } .cat-head { display: none; } }
 .help { font-size: calc(12.5px * var(--fs)); color: var(--ink-2); }
 .help li { margin: 2px 0; }
+.viewer-link { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin: 14px 0 4px; }
+.viewer-qr { display: block; flex: 0 0 164px; width: 164px; max-width: 100%; background: #fff; border-radius: 8px; }
+.viewer-qr svg { display: block; width: 100%; height: auto; shape-rendering: crispEdges; }
+.viewer-link-text { flex: 1 1 12em; min-width: 0; font-size: calc(12.5px * var(--fs)); overflow-wrap: anywhere; }
+.viewer-link-hint { color: var(--ink); font-weight: 600; margin-bottom: 6px; }
 
 /* ---- ツールチップ ---- */
 .tip {
