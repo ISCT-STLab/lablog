@@ -2,9 +2,9 @@
 // 記録のデータ（OneDrive）は扱わない（同じサイトのファイルだけが対象）。
 "use strict";
 
-const CACHE = "lablog-viewer-v3";
+const CACHE = "lablog-viewer-v4";
 const SHELL = ["./", "index.html", "style.css", "config.js", "cloud.js", "setup.js", "app.js", "favicon.svg",
-               "manifest.webmanifest", "icon-180.png"];
+               "manifest.webmanifest", "icon-180.png", "vendor/qrcode.js"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

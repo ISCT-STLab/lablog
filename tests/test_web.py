@@ -9,6 +9,6 @@ class WebTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "JavaScript のテストには Node.js が必要です")
     def test_report_and_quit(self):
         root = Path(__file__).resolve().parents[1]
-        result = subprocess.run([shutil.which("node"), "--test", "tests/web_report.test.cjs"],
+        result = subprocess.run([shutil.which("node"), "--test", "tests/web_report.test.cjs", "tests/web_qr.test.cjs"],
                                 cwd=root, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -131,6 +131,31 @@ function fmtWhen(ts) {
 function safeHref(url) {
   return /^(https?|file):/i.test(url) ? esc(url) : "#";
 }
+
+// スマホ用のURLを、リンクとローカル生成のQRコードで表示する。
+function viewerLinkHTML(value) {
+  let url;
+  try {
+    url = new URL(value);
+    if (!["https:", "http:"].includes(url.protocol)) return "";
+  } catch (e) { return ""; }
+  const href = esc(url.href);
+  let qr = "";
+  try {
+    if (url.href.length <= 2048) {
+      const code = qrcode(0, "M");
+      code.addData(url.href, "Byte");
+      code.make();
+      const svg = code.createSvgTag({ cellSize: 1, margin: 4, scalable: true })
+        .replace("<svg ", '<svg aria-hidden="true" focusable="false" ');
+      qr = `<a class="viewer-qr" href="${href}" target="_blank" rel="noopener noreferrer" aria-label="スマホ用ページを開く">${svg}</a>`;
+    }
+  } catch (e) { /* QRコードを作れない場合も、URLは表示する */ }
+  return `<div class="viewer-link">${qr}<div class="viewer-link-text">
+    ${qr ? '<div class="viewer-link-hint">スマホのカメラで読み取る</div>' : ""}
+    <a href="${href}" target="_blank" rel="noopener noreferrer">${esc(value)}</a>
+    </div></div>`;
+}
 // action：{ label, run }。付けたときは長めに出し、押せるようにする
 function flash(msg, action = null) {
   $$(".toast-msg").forEach((t) => t.remove());
@@ -1624,7 +1649,7 @@ async function renderSettings({ keep = false } = {}) {
           ${toggle("enabled", "連携する", s.cloud.enabled)}
           <div data-when="enabled">${toggle("reports", "日報もスマホに送る", s.cloud.reports !== false)}
             <p class="help">日報には、ファイル名などが入ることがあります。</p></div>
-          <p class="help" id="cloud-state">${s.cloud.enabled ? "確認中…" : ""}</p>
+          <div class="help" id="cloud-state">${s.cloud.enabled ? "確認中…" : ""}</div>
           <div class="row" data-when="enabled"><span class="spacer"></span><button class="btn" type="button" id="cloud-export">今すぐ同期</button></div>
         </form>
       </section>
@@ -1951,8 +1976,7 @@ async function loadCloudState() {
   const c = await api.get("/api/cloud", { quiet: true }).catch(() => null);
   const el = $("#cloud-state");
   if (!el || !c) return;
-  const viewer = c.viewer_url
-    ? `<a href="${safeHref(c.viewer_url)}" target="_blank" rel="noopener noreferrer">${esc(c.viewer_url)}</a>` : "";
+  const viewer = c.enabled ? viewerLinkHTML(c.viewer_url) : "";
   const who = c.account ? `<div>この PC の OneDrive：<b>${esc(c.account)}</b></div>`
     : `<div><span class="tag warn">個人用の OneDrive がありません</span> この PC の OneDrive に、個人の Microsoft アカウントでサインインしてください。</div>`;
   if (!c.enabled) {
@@ -1961,7 +1985,7 @@ async function loadCloudState() {
     // スマホに出せるのは 1 台の PC の記録だけ（cloud.py の _other_writer）
     const other = esc(c.blocked_by.name);
     el.innerHTML = `<span class="tag warn">別の PC と連携中</span> 「${other}」の記録を表示しています（最終更新 ${fmtWhen(c.blocked_by.exported)}）。
-      <div class="row" style="margin-top:8px"><button class="btn btn-sm" type="button" id="cloud-takeover">この PC に切り替える</button></div>`;
+      <div class="row" style="margin-top:8px"><button class="btn btn-sm" type="button" id="cloud-takeover">この PC に切り替える</button></div>${viewer}`;
     $("#cloud-takeover").addEventListener("click", async () => {
       if (!confirm(`スマホに表示する記録を、「${c.blocked_by.name}」からこの PC に切り替えます。よろしいですか？`)) return;
       await api.post("/api/cloud/takeover").catch((err) => alert(err.message));
@@ -1969,11 +1993,11 @@ async function loadCloudState() {
       setTimeout(loadCloudState, 3000);
     });
   } else if (c.last_error) {
-    el.innerHTML = `<span class="tag warn">書き出せませんでした</span> ${esc(c.last_error)}`;
+    el.innerHTML = `<span class="tag warn">書き出せませんでした</span> ${esc(c.last_error)}${viewer}`;
   } else if (!c.folder) {
-    el.innerHTML = `${who}<span class="tag warn">サインイン待ち</span> スマホで下のページを開き、同じアカウントでサインインしてください。<br>${viewer}`;
+    el.innerHTML = `${who}<span class="tag warn">サインイン待ち</span> スマホで下のページを開き、同じアカウントでサインインしてください。${viewer}`;
   } else {
-    el.innerHTML = `${who}<span class="tag">連携中</span> ${c.last_export ? `最終更新 ${fmtWhen(c.last_export)}` : ""}<br>${viewer}`;
+    el.innerHTML = `${who}<span class="tag">連携中</span> ${c.last_export ? `最終更新 ${fmtWhen(c.last_export)}` : ""}${viewer}`;
   }
   return c;
 }

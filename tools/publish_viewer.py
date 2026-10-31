@@ -26,7 +26,8 @@ WEB_DIR = ROOT / "lablog" / "web"
 DEFAULT_SITE = ROOT.parent / "lablog-pages"  # 研究室の組織のリポジトリ（gh-pages）に送る公開用フォルダ
 DEFAULT_REMOTE = f"https://github.com/{GITHUB_REPO}.git"
 FILES = ["index.html", "style.css", "app.js", "setup.js", "cloud.js", "sw.js", "favicon.svg", "manifest.webmanifest",
-         "icon-180.png", "icon-192.png", "icon-512.png", "fonts/KleeOne-Regular.woff2", "fonts/OFL.txt"]
+         "icon-180.png", "icon-192.png", "icon-512.png", "fonts/KleeOne-Regular.woff2", "fonts/OFL.txt",
+         "vendor/qrcode.js", "vendor/qrcode-LICENSE.txt", "vendor/qrcode-source.json"]
 CLIENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 BRANCH = "gh-pages"
 README = f"""# LabLog ビューアー

@@ -39,7 +39,8 @@ WEB_DIR = Path(__file__).parent / "web"
 STATIC = {"/": "index.html", "/app.js": "app.js", "/setup.js": "setup.js", "/cloud.js": "cloud.js", "/config.js": "config.js",
           "/style.css": "style.css", "/favicon.svg": "favicon.svg", "/manifest.webmanifest": "manifest.webmanifest",
           "/icon-180.png": "icon-180.png", "/icon-192.png": "icon-192.png", "/icon-512.png": "icon-512.png",
-          "/fonts/KleeOne-Regular.woff2": "fonts/KleeOne-Regular.woff2", "/fonts/OFL.txt": "fonts/OFL.txt"}
+          "/fonts/KleeOne-Regular.woff2": "fonts/KleeOne-Regular.woff2", "/fonts/OFL.txt": "fonts/OFL.txt",
+          "/vendor/qrcode.js": "vendor/qrcode.js", "/vendor/qrcode-LICENSE.txt": "vendor/qrcode-LICENSE.txt"}
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
                  ".webmanifest": "application/manifest+json", ".woff2": "font/woff2",

@@ -50,6 +50,15 @@ class KeyTest(unittest.TestCase):
         res, _ = self.request("GET", "/")
         self.assertEqual(res.status, 200)
 
+    def test_qr_encoder_is_served_locally(self):
+        res, data = self.request("GET", "/vendor/qrcode.js")
+        self.assertEqual(res.status, 200)
+        self.assertIn("javascript", res.getheader("Content-Type"))
+        self.assertIn(b"var qrcode", data)
+        res, data = self.request("GET", "/vendor/qrcode-LICENSE.txt")
+        self.assertEqual(res.status, 200)
+        self.assertIn(b"MIT License", data)
+
     def test_api_needs_key(self):
         res, data = self.request("GET", "/api/status")
         self.assertEqual(res.status, 401)
