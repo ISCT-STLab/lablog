@@ -354,7 +354,10 @@ function renderNotices() {
   const s = state.status, settings = state.settings && state.settings.settings;
   const items = [];
   if (cloud && s) {
-    if (s.state === "none") items.push(["warn", "PC から記録が届いていません。"]);
+    if (s.state === "none") items.push(["warn", `PC との連携を準備しています。OneDrive の同期には数分かかることがあります。届いた記録は自動で表示します。
+      <div>PC の LabLog を起動し、Microsoft アカウント連携をオンにしてください。長く変わらない場合は、PC の OneDrive が同期中か確認してください。</div>
+      <button class="btn btn-sm" type="button" id="cloud-reconnect">連携を再確認</button>`]);
+    if (s.link_error) items.push(["error", `連携を確認できませんでした。自動で再試行します。${esc(s.link_error)}`]);
     if (s.offline) items.push(["warn", "インターネットにつながらないため、前に読み込んだ内容を表示しています。"]);
     if (s.pending) items.push(["warn", `修正（${s.pending} 件）は、PC の LabLog が次に動いたときに反映されます。`]);
     for (const r of s.rejected || []) { // PC が取り込めなかった修正（cloud.js の checkPending）
@@ -366,6 +369,7 @@ function renderNotices() {
       items.push(["warn", `PC の LabLog が古いバージョン${s.app_version ? `（${esc(s.app_version)}）` : ""}です。PC で更新してください。`]);
     }
   }
+  if (cloud && state.cloudError) items.push(["error", `OneDrive に接続できませんでした。自動で再試行します。${esc(state.cloudError)}`]);
   const job = !cloud && s && s.ai_job;
   if (job && job.state === "running") {
     const pct = job.progress == null ? "" : `（${Math.round(job.progress * 100)}%）`;
@@ -388,6 +392,16 @@ function renderNotices() {
   }
   $("#notices").innerHTML = items.map(([kind, html]) =>
     `<div class="notice ${kind}"><span class="ico">!</span><div>${html}</div></div>`).join("");
+  const reconnect = $("#cloud-reconnect");
+  if (reconnect) reconnect.addEventListener("click", async () => {
+    reconnect.disabled = true;
+    try {
+      await cloud.reconnect();
+      await refreshStatus();
+      flash("連携を再確認しました。記録が届くまでお待ちください。");
+    } catch (e) { alert(e.message); }
+    finally { reconnect.disabled = false; }
+  });
   $$("[data-dismiss-rejected]").forEach((b) => b.addEventListener("click", () => {
     cloud.dismissRejected();
     state.status.rejected = [];
@@ -411,15 +425,30 @@ function versionLess(a, b) {
 async function refreshStatus() {
   if (state.quitting) return;
   try {
+    const wasWaiting = cloud && state.status && state.status.state === "none";
     state.status = await api.get("/api/status", { quiet: true });
     if (state.quitting) return;
+    state.statusChecked = Date.now();
+    state.cloudError = "";
     renderStatus();
+    if (!cloud && $("#cloud-state")) await loadCloudState();
+    if (wasWaiting && state.status.state !== "none" && state.nav && !hasUnsaved()
+        && !state.reportEditing && !state.reportBusy && !$("#stay-form")) {
+      cloud.clearCache();
+      await route(); // 待機中に開いた過去の日・月も、届いた時点で表示する
+    }
   } catch (e) {
     // ビューアー：PC で連携を解除した → サインアウトする。ほかはサーバー再起動中など（次の更新で戻る）
-    if (e.name === "Unlinked") {
+    if (cloud && (e.name === "Unlinked" || e.name === "SignInRequired")) {
       state.unlinked = true;
-      cloud.signOut();
+      state.nav = (state.nav || 0) + 1;
+      clearTimeout(state.refreshTimer);
+      clearInterval(state.statusTimer);
+      if (e.name === "Unlinked") cloud.signOut();
       renderSignIn(e.message);
+    } else if (cloud) {
+      state.cloudError = e.message;
+      renderNotices();
     }
   }
 }
@@ -1785,8 +1814,9 @@ async function renderSettings({ keep = false } = {}) {
       await new Promise((r) => setTimeout(r, 2000));
       const c = await loadCloudState();
       if (!c || c.last_error || c.blocked_by) return;
-      if (c.last_export && c.last_export !== (before && before.last_export)) { flash("同期しました"); return; }
+      if (c.last_export && c.last_export !== (before && before.last_export)) { flash("OneDrive フォルダに書き出しました。スマホへの反映には少し時間がかかります。"); return; }
     }
+    flash("OneDrive の同期を待っています。連携の確認は自動で続けます。");
   });
   $$("[data-wifi-register]").forEach((b) => b.addEventListener("click", async () => {
     await api.post("/api/wifi/register", { kind: b.dataset.wifiRegister }).catch((e) => alert(e.message));
@@ -1995,9 +2025,13 @@ async function loadCloudState() {
   } else if (c.last_error) {
     el.innerHTML = `<span class="tag warn">書き出せませんでした</span> ${esc(c.last_error)}${viewer}`;
   } else if (!c.folder) {
-    el.innerHTML = `${who}<span class="tag warn">サインイン待ち</span> スマホで下のページを開き、同じアカウントでサインインしてください。${viewer}`;
+    el.innerHTML = `${who}<span class="tag warn">連携準備中</span> スマホで下のページを開き、同じアカウントでサインインしてください。
+      <div>サインイン済みの場合は OneDrive の同期を待っています。数分かかることがあります。確認は自動で続けます。</div>${viewer}`;
+  } else if (!c.last_export) {
+    el.innerHTML = `${who}<span class="tag warn">書き出し中</span> スマホに送る記録を準備しています。${viewer}`;
   } else {
-    el.innerHTML = `${who}<span class="tag">連携中</span> ${c.last_export ? `最終更新 ${fmtWhen(c.last_export)}` : ""}${viewer}`;
+    el.innerHTML = `${who}<span class="tag">連携中</span> 最終書き出し ${fmtWhen(c.last_export)}
+      <div>スマホへの反映は OneDrive の同期後です。</div>${viewer}`;
   }
   return c;
 }
@@ -2078,5 +2112,7 @@ window.addEventListener("beforeunload", (e) => {
   if (state.unlinked) return;
   renderNotices();
   await route();
-  state.statusTimer = setInterval(refreshStatus, cloud ? 60000 : 15000);
+  state.statusTimer = setInterval(() => {
+    if (!cloud || !state.status || state.status.state === "none" || Date.now() - state.statusChecked >= 60000) refreshStatus();
+  }, 15000);
 })();

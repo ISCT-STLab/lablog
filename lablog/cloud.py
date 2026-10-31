@@ -41,7 +41,7 @@ MARKER = "viewer.json"
 UNLINKED = "unlinked.json"
 CHECK_SEC = 30          # 直した内容の確認・書き出しの間隔
 PERIODIC_SEC = 300      # 今日の分を書き出し直す間隔
-DETECT_SEC = 300        # 書き出し先が見つからないときに探し直す間隔
+DETECT_SEC = 30         # 連携の目印が OneDrive から届いたら、次の確認で書き出す
 REJECT_AFTER_SEC = 600  # 読めない修正ファイルを、同期の途中ではないとみなすまでの時間
 # 書き出す PC は 1 台だけ（meta.json の device）。その PC がこれだけ書き出していなければ、ほかの PC が引き継ぐ
 TAKEOVER_AFTER_SEC = 14 * 86400
@@ -183,6 +183,7 @@ class CloudSync:
         self._written: dict[str, str] = {}  # 書き出したファイルの中身のハッシュ
         self._last_periodic = 0.0
         self._last_detect = 0.0
+        self._viewer_stamp: str | None = None
         self.device: dict | None = None      # この PC の印（id は初回に作る。name は PC の名前）
         self.blocked_by: dict | None = None  # ほかの PC が書き出しているとき、その PC の名前と最終更新
         self._takeover = False
@@ -196,6 +197,7 @@ class CloudSync:
     def request_export(self):
         with self._lock:
             self._force = True
+            self._full = True  # 「今すぐ同期」は、消えた過去の分も確かめ直す
         self._wake.set()
 
     def request_full_export(self):
@@ -291,6 +293,8 @@ class CloudSync:
             if folder:
                 log.info("OneDrive の書き出し先: %s", folder)
             self.folder = folder
+            self.last_export = None
+            self.blocked_by = None
             self._written.clear()
             self._full = True
         return folder
@@ -313,6 +317,16 @@ class CloudSync:
             self._written.clear()
             self._full = True
             return
+        # 再サインインや OneDrive 上の削除を検知したら、過去の日も復旧する。
+        # 目印はスマホだけが作る。連携解除後に PC が勝手に作り直すことはしない。
+        try:
+            stamp = hashlib.sha256((folder / MARKER).read_bytes()).hexdigest()
+        except OSError:
+            stamp = None
+        if stamp != self._viewer_stamp or not (folder / "meta.json").is_file():
+            self._viewer_stamp = stamp
+            self._written.clear()
+            self._full = True
         changed = self.import_edits(conn, folder, now)
         with self._lock:
             days, self._dirty = self._dirty | changed, set()
@@ -325,7 +339,13 @@ class CloudSync:
         if full:
             days |= self._all_days(conn, today)
         if days or periodic:
-            self.export(conn, folder, days, now)
+            try:
+                self.export(conn, folder, days, now)
+            except Exception:
+                with self._lock:
+                    self._dirty.update(days)
+                    self._full |= full
+                raise  # 同期中の一時的なファイルエラーでも、次の確認でやり直す
 
     def unlink(self, conn, now: float) -> str | None:
         """OneDrive 上の記録（要約・修正・目印）を消して unlinked.json を置く。ほかの PC が書き出していれば何もしない。
@@ -399,7 +419,7 @@ class CloudSync:
                                                   .encode("utf-8")).hexdigest()
             except (OSError, ValueError):
                 pass
-        if self._written.get(key) == digest:
+        if self._written.get(key) == digest and path.is_file():
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name("~$" + path.name)  # 書きかけのファイルが同期されないよう、別名で書いてから置き換える
