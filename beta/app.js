@@ -278,6 +278,7 @@ function recordingItems() {
 }
 
 function renderStatus() {
+  if (state.quitting) return;
   const s = state.status;
   if (!s) return;
   if (cloud) return renderCloudStatus(s);
@@ -383,8 +384,10 @@ function versionLess(a, b) {
 }
 
 async function refreshStatus() {
+  if (state.quitting) return;
   try {
     state.status = await api.get("/api/status", { quiet: true });
+    if (state.quitting) return;
     renderStatus();
   } catch (e) {
     // ビューアー：PC で連携を解除した → サインアウトする。ほかはサーバー再起動中など（次の更新で戻る）
@@ -587,6 +590,7 @@ const currentPage = () => {
 const hasUnsaved = () => (state.reportEditing && state.reportDirty) || !!$("#stay-form[data-dirty]");
 
 async function route() {
+  if (state.quitting) return;
   clearTimeout(state.refreshTimer);
   state.reportEditing = state.reportDirty = false; // 画面を描き直すので、書きかけの状態も終わる
   state.tips = [];
@@ -607,6 +611,7 @@ async function route() {
     else if (page === "settings" && !cloud) { setTab("settings"); setLevel(0); await renderSettings(); }
     else { setTab("day"); await renderDay(arg); }
   } catch (e) {
+    if (state.quitting) return;
     if (e.name === "SignInRequired") return renderSignIn();
     if (e.name === "KeyRequired") {
       view.innerHTML = `<div class="card"><b>LabLog から開き直してください</b><p class="muted">${esc(e.message)}</p></div>`;
@@ -629,7 +634,7 @@ async function renderDay(dateArg, { keepScroll = false, quiet = false } = {}) {
   const hash = location.hash;
   const day = await api.get(`/api/day?date=${encodeURIComponent(date)}`, { quiet });
   // 読み込みを待つあいだに別の日・別の画面に移った、またはほかの画面を開いている（古い日の内容で上書きしない）
-  if (location.hash !== hash || currentPage() !== "day") return;
+  if (state.quitting || location.hash !== hash || currentPage() !== "day") return;
   const scrollY = window.scrollY;
   state.tips = [];
   const names = day.category_names;
@@ -1062,6 +1067,17 @@ function unsavedText(date) {
   try { return localStorage.getItem(unsavedKey(date)); } catch (e) { return null; }
 }
 
+// 同じ日の保存・生成は順番に処理する。画面を開き直して送っても、古い保存が後から上書きしない。
+const reportWrites = new Map();
+function writeReport(date, path, body) {
+  const previous = reportWrites.get(date);
+  const request = previous ? previous.catch(() => {}).then(() => api.post(path, body)) : api.post(path, body);
+  reportWrites.set(date, request);
+  return request.finally(() => {
+    if (reportWrites.get(date) === request) reportWrites.delete(date);
+  });
+}
+
 function reportMeta(r) {
   if (!r) return "";
   if (r.pending) return "保存しました（PC に反映待ち）";
@@ -1140,6 +1156,12 @@ window.addEventListener("resize", () => { const ta = $("#report-text"); if (ta) 
 function renderReport(day, { editing = false } = {}) {
   const card = $("#report-card");
   if (!card) return; // 日報を作っているあいだに、ほかの画面に移った
+  const context = state.reportView = { day, card }, nav = state.nav;
+  const isCurrent = () => !state.quitting && state.nav === nav && state.reportView === context && $("#report-card") === card;
+  const updateReport = (report) => {
+    day.report = report;
+    if (state.reportView && state.reportView.day.date === day.date) state.reportView.day.report = report;
+  };
   const r = day.report;
   const text = (r && r.text) || "";
   state.reportEditing = editing;
@@ -1164,9 +1186,10 @@ function renderReport(day, { editing = false } = {}) {
 
   if (editing) {
     const ta = $("#report-text"), save = $("#report-save");
+    let saving = false;
     const markDirty = () => {
       state.reportDirty = true;
-      save.disabled = false;
+      save.disabled = saving;
       $("#report-meta").textContent = "未保存";
     };
     if (hasKept) { // 前に書いて保存していなかった内容を戻す
@@ -1186,24 +1209,33 @@ function renderReport(day, { editing = false } = {}) {
       renderReport(day);
     });
     save.addEventListener("click", async () => {
+      if (saving) return;
+      saving = true;
       const sent = ta.value; // 送った内容。返事を待つあいだに書き足しても、保存されるのはここまで
       save.disabled = true;
       try {
-        await api.post("/api/report/save", { date: day.date, text: sent });
+        await writeReport(day.date, "/api/report/save", { date: day.date, text: sent });
       } catch (err) {
         alert(err.message);
         save.disabled = false;
         return;
+      } finally {
+        saving = false;
       }
-      day.report = { ...(r || {}), text: sent, edited: 1, saved_ts: Date.now() / 1000, pending: !!cloud };
-      if ($("#report-text") === ta && ta.value !== sent) { // 書き足した分は、未保存のまま残す
+      updateReport({ ...(day.report || {}), text: sent, edited: 1, saved_ts: Date.now() / 1000, pending: !!cloud });
+      // 入力欄が無くなっていても、その日付の保存内容が送信時と同じ場合だけ消す。
+      if (unsavedText(day.date) === sent) keepUnsaved(day.date, null);
+      if (!isCurrent()) {
+        flash(`${day.date} の日報を保存しました`);
+        return;
+      }
+      if (ta.value !== sent) { // 書き足した分は、未保存のまま残す
         keepUnsaved(day.date, ta.value);
         save.disabled = false;
         $("#report-meta").textContent = "保存しました（そのあとに書いた分は未保存）";
         flash("日報を保存しました（そのあとに書いた分は未保存です）");
         return;
       }
-      keepUnsaved(day.date, null);
       renderReport(day);
       flash("日報を保存しました");
     });
@@ -1220,27 +1252,37 @@ function renderReport(day, { editing = false } = {}) {
   });
   const gen = $("#report-gen");
   if (gen) gen.addEventListener("click", async () => {
-    if (r && r.edited && !confirm("編集した日報を、自動生成した内容で置き換えます。よろしいですか？")) return;
+    if (gen.disabled) return;
+    if (day.report && day.report.edited && !confirm("編集した日報を、自動生成した内容で置き換えます。よろしいですか？")) return;
     gen.disabled = true;
     $("#report-edit").disabled = true;
     gen.textContent = "作成中…";
     $("#report-meta").textContent = "作成中…";
-    state.reportBusy = true;
-    const before = r && r.text;
+    state.reportBusy = (state.reportBusy || 0) + 1;
+    const before = day.report && day.report.text;
+    let generated = false;
     try {
-      day.report = await api.post("/api/report/generate", { date: day.date, force: true });
+      updateReport(await writeReport(day.date, "/api/report/generate", { date: day.date, force: true }));
+      generated = true;
     } catch (err) {
       alert(err.message);
     } finally {
-      state.reportBusy = false;
-      renderReport(day);
+      state.reportBusy--;
+      if (isCurrent()) renderReport(day);
     }
     // 自動生成で置き換えた前の内容に戻せるように（戻すと、自分で保存した日報になる）
-    if (before && day.report && day.report.text !== before) {
+    if (generated && before && day.report && day.report.text !== before) {
       flash("日報を作り直しました", { label: "元に戻す", run: async () => {
-        await api.post("/api/report/save", { date: day.date, text: before }).catch((err) => alert(err.message));
-        day.report = { ...day.report, text: before, edited: 1, saved_ts: Date.now() / 1000 };
-        renderReport(day);
+        const active = state.reportView, activeNav = state.nav;
+        try {
+          await writeReport(day.date, "/api/report/save", { date: day.date, text: before });
+        } catch (err) {
+          alert(err.message);
+          return;
+        }
+        updateReport({ ...day.report, text: before, edited: 1, saved_ts: Date.now() / 1000, pending: !!cloud });
+        if (!state.quitting && state.nav === activeNav && state.reportView === active && active.day.date === day.date
+            && $("#report-card") === active.card && !state.reportEditing) renderReport(day);
       } });
     }
   });
@@ -1253,7 +1295,7 @@ async function renderMonth(monthArg) {
   const month = monthArg || today.slice(0, 7);
   const hash = location.hash;
   const m = await api.get(`/api/month?month=${encodeURIComponent(month)}`);
-  if (location.hash !== hash || currentPage() !== "month") return;
+  if (state.quitting || location.hash !== hash || currentPage() !== "month") return;
   const [y, mo] = month.split("-").map(Number);
   const maxStay = Math.max(HOUR, ...m.days.map((d) => d.stay));
   const lead = (new Date(y, mo - 1, 1).getDay() + 6) % 7; // 月曜始まり
@@ -1440,8 +1482,10 @@ async function loadOllamaState() {
 }
 
 async function renderSettings({ keep = false } = {}) {
+  const nav = state.nav;
   const draft = keep ? settingsDraft() : [];
   const { settings: s, data_dir: dataDir, repos, ssids } = await loadSettings();
+  if (state.quitting || state.nav !== nav || currentPage() !== "settings") return;
   const current = ssids && ssids[0];
   const where = !current ? "未接続" : s.wifi.univ.includes(current) ? "研究室として登録済み"
     : s.wifi.home.includes(current) ? "自宅として登録済み"
@@ -1680,11 +1724,26 @@ async function renderSettings({ keep = false } = {}) {
 
   // ---- そのほかの操作
   $("#update-check").addEventListener("click", () => checkUpdate($("#update-form").channel.value));
-  $("#app-quit").addEventListener("click", async () => {
+  $("#app-quit").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    if (button.disabled) return;
     if (!confirm("LabLog を終了します。記録も止まります。よろしいですか？")) return;
-    await api.post("/api/quit").catch(() => {});
+    button.disabled = true;
+    try {
+      const result = await api.post("/api/quit");
+      if (!result || result.ok !== true) throw new Error("終了を確認できませんでした");
+    } catch (err) {
+      button.disabled = false;
+      alert(`終了を確認できませんでした。${err.message}`);
+      return;
+    }
+    state.quitting = true;
     clearTimeout(state.refreshTimer);
-    view.innerHTML = `<section class="card"><div class="card-head"><h2>LabLog を終了しました</h2></div>
+    clearInterval(state.statusTimer);
+    $("#status").textContent = "終了しています";
+    $("#pause").disabled = true;
+    $("#notices").innerHTML = "";
+    view.innerHTML = `<section class="card"><div class="card-head"><h2>LabLog を終了しています</h2></div>
       <p class="help">もう一度使うときは、スタートメニューの「LabLog」を開いてください。</p></section>`;
   });
   bindRestore();
@@ -1995,5 +2054,5 @@ window.addEventListener("beforeunload", (e) => {
   if (state.unlinked) return;
   renderNotices();
   await route();
-  setInterval(refreshStatus, cloud ? 60000 : 15000);
+  state.statusTimer = setInterval(refreshStatus, cloud ? 60000 : 15000);
 })();
