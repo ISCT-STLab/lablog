@@ -213,10 +213,10 @@ window.LabLogCloud = (() => {
     if (cfg.dev) return Promise.resolve();
     if (linking) return linking;
     linking = (async () => {
-      const unlinked = await store.read("unlinked.json");
+      // 2 つを同時に読む（起動を速くするため。書き込みは解除通知を確かめてから）
+      const [unlinked, marker] = await Promise.all([store.read("unlinked.json"), store.read("viewer.json")]);
       if (!reconnect) checkUnlinked(unlinked);
       if (reconnect && Number.isFinite(unlinked && unlinked.unlinked)) save(KEY.unlinkAck, unlinked.unlinked);
-      const marker = await store.read("viewer.json");
       if (reconnect || !marker || marker.app !== MARKER.app) {
         await store.ensureRoot();
         const fresh = { ...MARKER, signed_in: Date.now() / 1000 };
@@ -235,9 +235,21 @@ window.LabLogCloud = (() => {
     return linking;
   }
 
-  // ---- 読み込み（1分間は読み直さない。通信できないときは前に読んだ内容を使う）
+  // ---- 読み込み：前に読んだ内容があれば、古くてもすぐ返して画面を出し、裏で読み直す。
+  // 読み直した内容が違っていれば "refresh" で知らせる（app.js が描き直す）。読んでから1分間は読み直さない。
+  // 通信できないときは前に読んだ内容を使う。同じファイルを同時に読むときは、1 回の通信を分け合う（inflight）。
+  // 読んでいる途中にサインアウト・修正の送信（clearCache）があれば、その結果は保存しない（epoch）
 
-  const mem = new Map();
+  const mem = new Map(), inflight = new Map();
+  let epoch = 0;
+  const listeners = { refresh: [], update: [] };
+  const emit = (name) => listeners[name].forEach((fn) => { try { fn(); } catch { /* 画面の都合で失敗しても続ける */ } });
+  let refreshTimer = null;
+  function changed() { // 続けて届いたものは、まとめて 1 回知らせる
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => emit("refresh"), 30);
+  }
+
   function remember(path) {
     const index = (load(KEY.cacheIndex) || []).filter((p) => p !== path);
     index.unshift(path);
@@ -245,27 +257,81 @@ window.LabLogCloud = (() => {
     save(KEY.cacheIndex, index);
   }
 
-  async function read(path) {
+  function cached(path) {
     const hit = mem.get(path) || load(KEY.cache + path);
     const ttl = path === "unlinked.json" || (hit && hit.data == null) ? 10 : CACHE_SEC;
-    if (hit && Date.now() - hit.t < ttl * 1000) return hit.data;
+    return { hit, recent: !!hit && Date.now() - hit.t < ttl * 1000 };
+  }
+
+  // fresh：前に読んだ内容は使わず、読み直しを待つ（修正を送る前の確かめ）
+  function read(path, { fresh = false } = {}) {
+    const { hit, recent } = cached(path);
+    if (recent) return Promise.resolve(hit.data);
+    const job = fetchLatest(path, hit);
+    if (!hit || fresh) return job;
+    job.then((data) => { if (JSON.stringify(data) !== JSON.stringify(hit.data)) changed(); }, () => {});
+    return Promise.resolve(hit.data);
+  }
+
+  // 裏で読んでおくだけ（知らせない）。次に開きそうな画面の分
+  function warm(path) {
+    const { hit, recent } = cached(path);
+    if (!recent) fetchLatest(path, hit).catch(() => {});
+  }
+
+  function fetchLatest(path, hit) {
+    if (!inflight.has(path)) {
+      const job = fetchFile(path, hit, epoch).finally(() => { if (inflight.get(path) === job) inflight.delete(path); });
+      inflight.set(path, job);
+    }
+    return inflight.get(path);
+  }
+
+  async function fetchFile(path, hit, started) {
+    const asked = Date.now(); // 読み始めた時刻（この時点の内容として覚える）
     try {
       const data = await store.read(path);
-      const entry = { t: Date.now(), data };
-      mem.set(path, entry);
-      save(KEY.cache + path, entry);
-      remember(path);
-      state.offline = false;
+      if (started === epoch) {
+        const entry = { t: asked, data };
+        mem.set(path, entry);
+        save(KEY.cache + path, entry);
+        remember(path);
+      }
+      setOffline(false);
       return data;
     } catch (e) {
+      if (e.name === "SignInRequired") { // 前の記録を出したままにせず、サインインの画面にする
+        state.fatal = e;
+        changed();
+      }
       if (e.name === "SignInRequired" || !hit) throw e;
-      state.offline = true;
+      setOffline(true);
       return hit.data;
     }
   }
 
+  function setOffline(value) {
+    if (state.offline === value) return;
+    state.offline = value;
+    changed(); // 「前に読み込んだ内容を表示しています」のお知らせを出し入れする
+  }
+
+  // 起動時：連携の確認と並行して、最初に開く画面の記録を読み始める（getStatus・getDay が同じ通信を使う）
+  function prefetch() {
+    const [, page, arg = ""] = (location.hash || "#/day").split("/");
+    const file = page === "month" ? `months/${/^\d{4}-\d{2}$/.test(arg) ? arg : today().slice(0, 7)}.json`
+      : `days/${/^\d{4}-\d{2}-\d{2}$/.test(arg) ? arg : today()}.json`;
+    ["meta.json", "unlinked.json", file].forEach(warm);
+  }
+
+  // 裏で読んでいるもの（連携の確認を含む）がすべて終わるまで待つ（app.js が、その間も上の帯を流す）
+  const settled = () => Promise.allSettled([...inflight.values(), linking, state.pendingJob].filter(Boolean))
+    .then(() => {});
+
   function clearCache() {
+    epoch++;
     mem.clear();
+    inflight.clear();
     (load(KEY.cacheIndex) || []).forEach((p) => {
       const hit = load(KEY.cache + p);
       if (hit) save(KEY.cache + p, { ...hit, t: 0 }); // 通信できないときのために中身は残す
@@ -316,11 +382,12 @@ window.LabLogCloud = (() => {
     save(KEY.pending, [...pendingEdits(), { name, ...body }]);
   }
 
-  async function checkPending(meta) {
+  // 反映待ちの修正を、PC が取り込んだか確かめる（裏で行い、変わったら知らせる。画面を出すのは待たせない）
+  function checkPending(meta) {
     const list = pendingEdits();
-    if (!list.length || Date.now() - state.pendingChecked < 30000) return;
+    if (!list.length || state.pendingJob || Date.now() - state.pendingChecked < 30000) return;
     state.pendingChecked = Date.now();
-    try {
+    state.pendingJob = (async () => {
       const names = new Set(await store.list("edits"));
       // PC が取り込めなかったもの（cloud.py の _reject）：理由を覚えて、お知らせに出す
       const rejected = list.filter((e) => names.has(e.name.replace(/\.json$/, ".rejected")));
@@ -331,9 +398,12 @@ window.LabLogCloud = (() => {
           { date: e.date, type: e.type, error: (info && info.error) || "PC の LabLog が取り込めませんでした" }]);
         await store.remove(file).catch(() => {});
       }
-      // PC が取り込んで消し、その後の書き出しも届いたものは外す
-      save(KEY.pending, list.filter((e) => !rejected.includes(e) && (names.has(e.name) || !meta || meta.exported < e.ts)));
-    } catch { /* 通信できないときは次の機会に */ }
+      // PC が取り込んで消し、その後の書き出しも届いたものは外す（確かめている間に送った修正は残す）
+      const done = new Set(list.filter((e) => rejected.includes(e) || (!names.has(e.name) && meta && meta.exported >= e.ts))
+        .map((e) => e.name));
+      save(KEY.pending, pendingEdits().filter((e) => !done.has(e.name)));
+      if (done.size) changed();
+    })().catch(() => { /* 通信できないときは次の機会に */ }).finally(() => { state.pendingJob = null; });
   }
 
   // PC が取り込み済みのもの（書き出された内容に同じものがある）は重ねない（二重に出さない）
@@ -366,13 +436,14 @@ window.LabLogCloud = (() => {
   // ---- app.js からの /api/... の呼び出しを受ける
 
   async function getStatus() {
+    if (state.fatal) throw state.fatal; // 裏で確かめて、連携の解除・サインインの期限切れが分かった
     const [meta, unlinked] = await Promise.all([read("meta.json"), read("unlinked.json")]);
     checkUnlinked(unlinked); // 古い記録のキャッシュがあっても、明示的な連携解除は反映する
     if ((!meta || state.linkError) && Date.now() - state.linkChecked >= 30000) {
       try { await ensureViewerLink(); }
       catch (e) { if (e.name === "Unlinked" || e.name === "SignInRequired") throw e; }
     }
-    await checkPending(meta);
+    checkPending(meta);
     const base = { today: today(), offline: state.offline, pending: pendingEdits().length,
                    rejected: load(KEY.rejected) || [], link_error: state.linkError };
     if (!meta) return { ...base, state: "none" };
@@ -381,9 +452,9 @@ window.LabLogCloud = (() => {
              viewer_version: cfg.version || null, device: meta.device ? meta.device.name : null };
   }
 
-  async function getDay(date) {
-    const [meta, data] = await Promise.all([read("meta.json"), read(`days/${date}.json`)]);
-    await checkPending(meta); // 取り込み済みの修正を、反映待ちの一覧から外す
+  async function getDay(date, { fresh = false } = {}) {
+    const [meta, data] = await Promise.all([read("meta.json"), read(`days/${date}.json`, { fresh })]);
+    checkPending(meta); // 取り込み済みの修正を、反映待ちの一覧から外す
     const day = data ? structuredClone(data) : emptyDay(date, meta);
     day.is_today = date === today();
     day.reports_off = !!meta && meta.reports === false; // PC の設定で、日報をスマホに送っていない
@@ -410,7 +481,7 @@ window.LabLogCloud = (() => {
     // PC と同じ確かめ（presence.py の save_stay）。PC で受け付けられない修正は、ここで止める
     const now = Date.now() / 1000;
     if (start > now || (end != null && end > now)) throw new Error("これからの時刻は入れられません");
-    const day = await getDay(body.date);
+    const day = await getDay(body.date, { fresh: true });
     const until = end ?? now;
     if (day.stays.some((s) => s.id !== body.id && start < (s.state === "in" ? now : s.end) && s.start < until)) {
       throw new Error("ほかの入退室と重なっています");
@@ -428,6 +499,13 @@ window.LabLogCloud = (() => {
       if (p === "/api/month") return getMonth(q.get("month") || today().slice(0, 7));
       throw new Error(PC_ONLY);
     },
+    // 次に開きそうな画面（前後の日・月）の記録を裏で読んでおく
+    prefetch(path) {
+      const [p, qs] = path.split("?");
+      const q = new URLSearchParams(qs);
+      if (p === "/api/day" && /^\d{4}-\d{2}-\d{2}$/.test(q.get("date") || "")) warm(`days/${q.get("date")}.json`);
+      if (p === "/api/month" && /^\d{4}-\d{2}$/.test(q.get("month") || "")) warm(`months/${q.get("month")}.json`);
+    },
     async post(path, body) {
       if (path === "/api/report/save") await submitEdit({ type: "report", date: body.date, text: String(body.text || "") });
       else if (path === "/api/stay/save") await saveStay(body);
@@ -438,9 +516,49 @@ window.LabLogCloud = (() => {
     },
   };
 
+  // 画面ファイルの保存（sw.js）。新しいバージョンを取り終えて待機していたら "update" で知らせる
+  function watchWorker() {
+    const sw = navigator.serviceWorker;
+    sw.register("sw.js").then((reg) => {
+      const found = () => {
+        if (!reg.waiting || !sw.controller) return; // 初めて保存したとき（切り替えではない）は知らせない
+        state.waitingWorker = reg.waiting;
+        emit("update");
+      };
+      found(); // 前に開いたときに取ってあった分
+      reg.addEventListener("updatefound", () => {
+        const next = reg.installing;
+        if (next) next.addEventListener("statechange", () => { if (next.state === "installed") found(); });
+      });
+      // ホーム画面のアプリは開いたままのことが多いので、戻ってきたときにも新しいバージョンを確かめる（30 分に 1 回まで）
+      let checked = Date.now();
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible" || Date.now() - checked < 30 * 60 * 1000) return;
+        checked = Date.now();
+        reg.update().catch(() => {});
+      });
+    }).catch(() => {});
+    sw.addEventListener("controllerchange", () => { if (state.applying) location.reload(); });
+  }
+
+  // 待機している新しいバージョンに切り替えて、開き直す。待機しているものが無ければ false
+  function applyUpdate() {
+    if (!state.waitingWorker || state.applying) return false;
+    state.applying = true;
+    state.waitingWorker.postMessage("skipWaiting");
+    return true;
+  }
+
+  // 裏で連携を確かめて、だめだったとき：解除されていればサインアウトし、画面に知らせる
+  function failLink(e) {
+    if (e.name === "Unlinked") signOut();
+    if (e.name === "Unlinked" || e.name === "SignInRequired") state.fatal = e;
+    changed(); // 一時的な通信エラーも、お知らせ（link_error）に出す
+  }
+
   // 起動時：サインインの確認と、画面ファイルの保存（電波がないときも開けるように）
   async function ready() {
-    if ("serviceWorker" in navigator && !cfg.dev) navigator.serviceWorker.register("sw.js").catch(() => {});
+    if ("serviceWorker" in navigator && !cfg.dev) watchWorker();
     if (cfg.dev) return { signedIn: true };
     if (!cfg.clientId) return { signedIn: false, error: "ビューアーの準備（Microsoft へのアプリ登録）がまだ終わっていません。" };
     let reconnect = false;
@@ -452,8 +570,15 @@ window.LabLogCloud = (() => {
     const tok = load(KEY.token);
     const signedIn = !!(tok && (tok.access || tok.refresh)) || (!!tok && Date.now() - (load(KEY.silent) || 0) > 10 * 60 * 1000);
     if (signedIn) {
+      prefetch();
+      const check = ensureViewerLink(reconnect);
+      // この端末で連携を確かめたことがあれば、確かめ終わるのを待たずに前回の記録を出す（確かめるのは裏で続ける）
+      if (!reconnect && load(KEY.marker)) {
+        check.catch(failLink);
+        return { signedIn };
+      }
       try {
-        await ensureViewerLink(reconnect);
+        await check;
       } catch (e) {
         if (e.name === "Unlinked") { signOut(); return { signedIn: false, error: e.message }; }
         if (e.name === "SignInRequired") return { signedIn: false };
@@ -464,6 +589,8 @@ window.LabLogCloud = (() => {
   }
 
   function signOut() {
+    epoch++; // 読んでいる途中の記録を、消したあとに保存し直さない
+    inflight.clear();
     Object.keys(localStorage).filter((k) => k.startsWith("lablog.")).forEach((k) => localStorage.removeItem(k));
     mem.clear();
     state.linkChecked = 0;
@@ -471,6 +598,7 @@ window.LabLogCloud = (() => {
   }
 
   return { api, ready, signIn: () => signIn(), signOut, clearCache, reconnect: () => ensureViewerLink(true),
+           settled, applyUpdate, on: (name, fn) => listeners[name].push(fn),
            dev: !!cfg.dev, build: cfg.build || "",
            version: cfg.version || "",
            dismissRejected: () => save(KEY.rejected, null) };

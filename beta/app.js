@@ -53,7 +53,11 @@ function track(promise, quiet = false) {
 }
 
 const api = cloud ? {
-  get: (path, { quiet } = {}) => track(cloud.api.get(path), quiet),
+  // 前回の記録をすぐ返す。裏で読み直している間も、上の帯を流し続ける（cloud.settled）
+  get: (path, { quiet } = {}) => track(cloud.api.get(path).then((res) => {
+    if (!quiet) track(cloud.settled());
+    return res;
+  }), quiet),
   // 直した内容は PC が取り込むまで「反映待ち」になるので、上部のお知らせも出し直す
   post: (path, body) => track(cloud.api.post(path, body)).then((res) => { refreshStatus(); return res; }),
 } : {
@@ -780,6 +784,10 @@ async function renderDay(dateArg, { keepScroll = false, quiet = false } = {}) {
   $$("[data-edit-stay]").forEach((b) => b.addEventListener("click", () =>
     openStayForm(day, day.stays.find((s) => s.id === Number(b.dataset.editStay)))));
   if (keepScroll) window.scrollTo(0, scrollY);
+  if (cloud && !quiet) { // 前後の日を先に読んでおき、移ったらすぐ出す（PC は手元にあるので要らない）
+    cloud.api.prefetch(`/api/day?date=${addDays(day.date, -1)}`);
+    if (!day.is_today) cloud.api.prefetch(`/api/day?date=${addDays(day.date, 1)}`);
+  }
 
   clearTimeout(state.refreshTimer); // 入室ボタンなどで描き直したときも、更新のタイマーは 1 つだけにする
   if (day.is_today) {
@@ -1344,11 +1352,11 @@ function renderReport(day, { editing = false } = {}) {
 
 // ------------------------------------------------------------ 月
 
-async function renderMonth(monthArg) {
+async function renderMonth(monthArg, { quiet = false } = {}) {
   const today = (state.status && state.status.today) || isoDate(new Date());
   const month = monthArg || today.slice(0, 7);
   const hash = location.hash;
-  const m = await api.get(`/api/month?month=${encodeURIComponent(month)}`);
+  const m = await api.get(`/api/month?month=${encodeURIComponent(month)}`, { quiet });
   if (state.quitting || location.hash !== hash || currentPage() !== "month") return;
   const [y, mo] = month.split("-").map(Number);
   const maxStay = Math.max(HOUR, ...m.days.map((d) => d.stay));
@@ -1392,6 +1400,10 @@ async function renderMonth(monthArg) {
   // 月の画面は、作業した日の平均で段階を決める
   const active = m.days.filter((d) => d.work >= 600 || d.stay > 0);
   setLevel(active.length ? levelOf(active.reduce((sum, d) => sum + effortSec(d.work, d.stay), 0) / active.length) : 0);
+  if (cloud && !quiet) { // 前後の月を先に読んでおく
+    cloud.api.prefetch(`/api/month?month=${addMonths(month, -1)}`);
+    if (month < today.slice(0, 7)) cloud.api.prefetch(`/api/month?month=${addMonths(month, 1)}`);
+  }
 }
 
 // PC の「CSV で書き出す」と同じ形式（Excel で文字化けしないよう BOM 付き）
@@ -2050,6 +2062,7 @@ function catRowHTML(c, i, names) {
 // ------------------------------------------------------------ ビューアー（サインイン）
 
 function renderSignIn(error) {
+  state.live = false; // 裏で届いた記録で、サインインの画面を描き替えない
   clearTimeout(state.refreshTimer);
   setLevel(0);
   $(".tabs").classList.add("hidden");
@@ -2097,7 +2110,34 @@ window.addEventListener("hashchange", () => {
 window.addEventListener("beforeunload", (e) => {
   if (hasUnsaved()) { e.preventDefault(); e.returnValue = ""; }
 });
-(async () => {
+
+if (cloud) {
+  // ビューアー：前回の記録を先に出し、裏で読み直した記録が違っていたら描き直す。
+  // 書いている途中は描き直さない（1 分ごとの更新や、画面を移ったときに出る）
+  cloud.on("refresh", () => {
+    if (!state.live || state.unlinked || state.quitting) return;
+    refreshStatus();
+    const typing = document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+    if (typing || hasUnsaved() || state.reportEditing || state.reportBusy || $("#stay-form")) return;
+    const [, page, arg] = (location.hash || "#/day").split("/");
+    if (currentPage() === "day") renderDay(arg, { keepScroll: true, quiet: true }).catch(() => {});
+    else if (page === "month") {
+      const y = window.scrollY;
+      renderMonth(arg, { quiet: true }).then(() => window.scrollTo(0, y), () => {});
+    }
+  });
+  // 新しいバージョンの画面ファイルを取り終えた（sw.js）。切り替えて開き直す。
+  // ボタンを押さなくても、ほかのアプリから戻ってきたときに切り替える（書きかけがあるときを除く）
+  cloud.on("update", () => {
+    flash("新しいバージョンがあります", { label: "更新", run: () => cloud.applyUpdate() });
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && !hasUnsaved()) cloud.applyUpdate();
+  });
+}
+// 起動：最初の画面が出るまで（スマホではサインインと OneDrive の確認を含む）、上の帯を流し続ける。
+// スクリプトが動く前の分は index.html の body.booting が受け持つ
+track((async () => {
   if (cloud) {
     $("[data-tab=settings]").remove();
     const reload = $("#pause");
@@ -2106,6 +2146,7 @@ window.addEventListener("beforeunload", (e) => {
     reload.title = "更新";
     const { signedIn, error } = await cloud.ready();
     if (!signedIn) return renderSignIn(error);
+    state.live = true;
     renderFooter();
   }
   await Promise.all([refreshStatus(), cloud ? null : loadSettings().catch(() => null)]);
@@ -2115,4 +2156,7 @@ window.addEventListener("beforeunload", (e) => {
   state.statusTimer = setInterval(() => {
     if (!cloud || !state.status || state.status.state === "none" || Date.now() - state.statusChecked >= 60000) refreshStatus();
   }, 15000);
-})();
+})()).catch((e) => {
+  // 想定外のエラーで止まったとき、「読み込んでいます」のまま残さない
+  if ($(".boot-msg")) view.innerHTML = `<div class="card"><b>読み込めませんでした</b><p class="muted">${esc(e.message)}</p></div>`;
+}).finally(() => document.body.classList.remove("booting"));
