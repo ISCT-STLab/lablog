@@ -50,6 +50,12 @@ class KeyTest(unittest.TestCase):
         res, _ = self.request("GET", "/")
         self.assertEqual(res.status, 200)
 
+    def test_pages_cannot_be_framed(self):
+        for path, cookie in (("/", None), ("/api/status", None), ("/api/status", self.cookie())):
+            res, _ = self.request("GET", path, cookie=cookie)
+            self.assertEqual(res.getheader("Content-Security-Policy"), "frame-ancestors 'none'", path)
+            self.assertEqual(res.getheader("X-Frame-Options"), "DENY", path)
+
     def test_qr_encoder_is_served_locally(self):
         res, data = self.request("GET", "/vendor/qrcode.js")
         self.assertEqual(res.status, 200)

@@ -97,9 +97,9 @@ def make_handler(out: Path, viewer_version: str):
                 return self._send(404, b"not found")
             name = "index.html" if url == "/" else url.lstrip("/")
             file = WEB_DIR / name
-            # 画面のファイルは web の直下と fonts フォルダ（同梱のフォント）だけを出す
+            # 画面のファイルは web の直下と fonts・vendor フォルダ（同梱のフォント・QR コード）だけを出す
             folder, _, base = name.rpartition("/")
-            if folder in ("", "fonts") and "/" not in base and file.is_file() and file.suffix in TYPES:
+            if folder in ("", "fonts", "vendor") and "/" not in base and file.is_file() and file.suffix in TYPES:
                 return self._send(200, file.read_bytes(), TYPES[file.suffix])
             self._send(404, b"not found")
 

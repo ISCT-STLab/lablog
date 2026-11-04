@@ -711,6 +711,12 @@ body::after { content: ""; position: fixed; top: 0; left: 0; right: 0; height: 3
   opacity: 0; transition: opacity .2s; }
 body.loading::after { opacity: 1; animation: loading-bar 1.1s linear infinite; }
 @keyframes loading-bar { from { background-position: -60% 0; } to { background-position: 160% 0; } }
+/* 起動中（index.html の body.booting）：スクリプトが動く前から、最初の画面が出るまで帯と案内を出す。
+   すぐ開けるとき（PC）にちらつかないよう、少し遅れて出す */
+body.booting::after { opacity: 1; animation: loading-bar 1.1s linear infinite, boot-in .2s ease-out .25s backwards; }
+.boot-msg { margin: 18vh 0 0; text-align: center; color: var(--muted); font-size: calc(14px * var(--fs));
+  animation: boot-in .3s ease-out .4s backwards; }
+@keyframes boot-in { from { opacity: 0; } }
 body.navigating #view { opacity: .55; transition: opacity .15s; }
 :is(.btn, .icon-btn, .choice, .seg-btn).busy { pointer-events: none; }
 .btn.busy:not(.btn-icon)::before { content: ""; display: inline-block; width: .85em; height: .85em; margin-right: .45em;
@@ -719,7 +725,7 @@ body.navigating #view { opacity: .55; transition: opacity .15s; }
 .btn-icon.busy svg { animation: spin .8s linear infinite; }
 .icon-btn.busy { opacity: .4; }
 @media (prefers-reduced-motion: reduce) {
-  body.loading::after { animation: none; background-size: 100% 100%; }
+  body:is(.loading, .booting)::after { animation: none; background-size: 100% 100%; }
 }
 
 /* ---- 作業量の演出 ----

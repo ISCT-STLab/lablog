@@ -29,6 +29,7 @@ FILES = ["index.html", "style.css", "app.js", "setup.js", "cloud.js", "sw.js", "
          "icon-180.png", "icon-192.png", "icon-512.png", "fonts/KleeOne-Regular.woff2", "fonts/OFL.txt",
          "vendor/qrcode.js", "vendor/qrcode-LICENSE.txt", "vendor/qrcode-source.json"]
 CLIENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+SW_PLACEHOLDER = 'const CHANNEL = "dev", BUILD = "dev";'  # sw.js の、公開するときに書き換える行
 BRANCH = "gh-pages"
 README = f"""# LabLog ビューアー
 
@@ -64,10 +65,20 @@ def build(site: Path, client_id: str, beta: bool = False):
         (target / "manifest.webmanifest").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     # version：ビューアーの一番下に出す。PC の LabLog がこれより古ければ、ビューアーが更新を勧める
     # build：公開した日時（一番下のバージョンにカーソルを当てると出る）
-    config = json.dumps({"clientId": client_id, "version": __version__, "build": datetime.now().strftime("%m/%d %H:%M")})
+    # release：公開ごとの印。sw.js にも書き、端末に保存した画面ファイルが同じ公開のものかを確かめる
+    now = datetime.now()
+    release = f"{__version__}-{now:%Y%m%d%H%M%S}"
+    config = json.dumps({"clientId": client_id, "version": __version__, "build": now.strftime("%m/%d %H:%M"),
+                         "release": release})
     (target / "config.js").write_text(
         "// スマホ用ビューアーの設定（tools/publish_viewer.py が作る）。clientId は公開して問題ない値。\n"
         f"window.LABLOG_CLOUD = {config};\n", encoding="utf-8")
+    sw = (target / "sw.js").read_text(encoding="utf-8")
+    if SW_PLACEHOLDER not in sw:
+        sys.exit("sw.js に、版と公開の印を書き込む行が見つかりません")
+    channel = "beta" if beta else "stable"
+    sw = sw.replace(SW_PLACEHOLDER, f"const CHANNEL = {json.dumps(channel)}, BUILD = {json.dumps(release)};")
+    (target / "sw.js").write_text(sw, encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
     (site / "README.md").write_text(README, encoding="utf-8")
 

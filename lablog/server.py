@@ -370,6 +370,9 @@ def make_handler(api: Api, key: str, port: int):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            # ほかのページの中に埋め込ませない（見えない枠に重ねて押させる操作を防ぐ）。X-Frame-Options は古いブラウザ向け
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("X-Frame-Options", "DENY")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
