@@ -8,7 +8,7 @@
 // 安定版（…/lablog/）とベータ版（…/lablog/beta/）は保存場所を分け、互いのファイルと保存場所には触れない。
 "use strict";
 
-const CHANNEL = "beta", BUILD = "1.0.0b9-20261104174641";
+const CHANNEL = "beta", BUILD = "1.0.0-20261105141306";
 const PREFIX = `lablog-${CHANNEL}-`;
 const CACHE = PREFIX + BUILD;
 // 大きくてバージョンで変わらないもの（フォント・大きいアイコン）は、使ったときに別の保存場所に置き、切り替えても取り直さない
